@@ -4,7 +4,64 @@ import torch
 from torch.nn import functional as F
 import argparse
 import time
+import os
+import csv
+from collections import OrderedDict
+import json
 
+
+# Node 类
+from speculative import *
+import torch
+import torch.nn.functional as F
+    
+def normal_generate(large_model, tokenizer, input_ids, device, args):
+    print("Baseline autoregressive:")
+    input_ids = input_ids.to(device)
+    _prefix, t_ar, _, tp_ar = autoregressive_sampling(
+        input_ids, large_model.to(device),
+        args.max_len,
+        args.temperature, args.top_k, args.top_p)
+    
+    print('text: ', tokenizer.decode(_prefix[0], skip_special_tokens=True))
+    print(f"  throughput_base: {tp_ar:.4f}")
+    print(f"  time_cost_base: {t_ar:.4f}")
+    return _prefix, t_ar, tp_ar
+
+def transmission_simulator(token_count: int, rtt: float, bandwidth: float, bits_per_token: int = 32) -> float:
+    """
+    One-way transmission delay: RTT/2 + serialization delay
+    bandwidth: Mbps (Megabits per second)
+    bits_per_token: bits per token (default is 32 bits)
+    """
+    # 计算总比特数
+    total_bits = token_count * bits_per_token
+    
+    # 将 Mbps 转换为 bps，然后计算序列化延迟
+    bandwidth_bps = bandwidth * 1e6  # Mbps → bps
+    serialize = total_bits / bandwidth_bps
+    return rtt / 2 + serialize
+
+class Recorder:
+    def __init__(self, csv_path="results.csv"):
+        self.rows = []
+        self.csv_path = csv_path
+
+    def add_entry(self, **kw):
+        # kw: model_s, model_l, gamma, rtt, bw, dsp_thr, base_thr, speedup,
+        #     b, c, accept_rate, T_comm, T_slm, T_llm, prompt_len
+        row = OrderedDict(kw)          # keep order
+        self.rows.append(row)
+        # append to disk incrementally
+        write_header = not os.path.exists(self.csv_path)
+        with open(self.csv_path, "a", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=row.keys())
+            if write_header: w.writeheader()
+            w.writerow(row)
+
+    def summary(self):
+        print(json.dumps(self.rows, indent=2))
+        
 # ==== DSSD patch BEGIN ====
 def decompress_logits(compressed_data: bytes, vocab_size: int, k: int = 8) -> torch.Tensor:
     """
@@ -49,6 +106,47 @@ def compress_logits(logits: torch.Tensor, k: int = 8) -> torch.Tensor:
 
 def tensor_nbytes(t: torch.Tensor) -> int:
     return t.element_size() * t.numel()
+
+def decompress_summary(data: bytes, V: int, k: int = 8) -> torch.Tensor:
+    """
+    解压摘要数据为稀疏logits
+    data: 压缩的字节数据 (indices + probs)
+    V: 词表大小
+    k: top-k数量
+    """
+    import numpy as np
+    import math
+    
+    # data 包含 4*k bytes 索引(int32) + 2*k bytes probs(float16)
+    ids = np.frombuffer(data[:4*k], dtype=np.int32)
+    probs = np.frombuffer(data[4*k:4*k+2*k], dtype=np.float16)
+    
+    # 构造稀疏logits
+    q = torch.full((V,), -float('inf'))
+    for idx, p in zip(ids, probs):
+        if p > 0:  # 避免log(0)
+            q[idx] = math.log(float(p))
+        else:
+            q[idx] = -float('inf')
+    return q
+
+def decompress_diff_summary(diff_payloads: list, prev_summary: list) -> list:
+    """
+    通过XOR差分恢复完整摘要bytes
+    diff_payloads: 差分数据列表
+    prev_summary: 上一轮完整摘要列表
+    """
+    if prev_summary is None:
+        # 第一轮，diff就是完整数据
+        return diff_payloads
+    
+    restored = []
+    for diff, prev in zip(diff_payloads, prev_summary):
+        # 压缩数据长度固定，直接XOR恢复
+        assert len(diff) == len(prev), f"差分长度不一致: {len(diff)} vs {len(prev)}"
+        block = bytes(a ^ b for a, b in zip(diff, prev))
+        restored.append(block)
+    return restored
 # ==== DSSD patch END ====
 
 def top_k_top_p_filter(logits, top_k: int = 0, top_p: float = 0.0):
@@ -298,18 +396,6 @@ def generate(input_text, draft_model_name, target_model_name, max_len=20, verbos
     # print(f"speculative_sampling: {generated_text}")
     print(f"speculative throughput: \033[91m{sp_throughput}\033[0m")
 
-
-    # torch.manual_seed(seed)
-    # ag_text, ag_time, ag_len, ag_throughput = autoregressive_sampling(input_ids, large_model, max_len, top_k = 10, temperature=0.7, device=device)
-    # generated_text = tokenizer.decode(ag_text[0], skip_special_tokens=True)
-    # # print(f"autoregressive_sampling: {generated_text}")
-    # print(f"autoregressive throughput: \033[91m{ag_throughput}\033[0m")
-
-    # # torch.manual_seed(seed)
-    # agsm_text, agsm_time, agsm_len, agsm_throughput = autoregressive_sampling(input_ids, small_model, max_len, top_k = 10, temperature=0.7, device=device)
-    # generated_text = tokenizer.decode(agsm_text[0], skip_special_tokens=True)
-    # # print(f"speculative_sampling: {generated_text}")
-    # print(f"speculative throughput: \033[91m{agsm_throughput}\033[0m")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='args')
