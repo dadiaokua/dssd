@@ -190,8 +190,8 @@ class BSNode:
             q_i = q_values[i]  # 设备发送的q_i = Q_i(x_i)（关键：仅用概率值）
             p_i = p_probs[i, tok_id].item()  # 基站计算的p_i = P_i(x_i)
 
-            # 接受条件：r_j < min(1, q_i/p_i)（Algorithm 2的核心逻辑）
-            if torch.rand(1).item() > min(1.0, q_i / p_i):
+            # 接受条件：r_j < min(1, p_i/q_i)（Algorithm 2的核心逻辑）
+            if torch.rand(1).item() > min(1.0, p_i / q_i):
                 # 拒绝：记录位置j和P_j分布（发送给设备重新采样）
                 flag = 0
                 j = current_j
@@ -209,7 +209,7 @@ class BSNode:
 
         return j, flag, pj, xj, correct_num, reject_num
 
-def generate_with_distributed_sp(uav_node, bs_node, input_ids, tokenizer, args):
+def generate_DSD(uav_node, bs_node, input_ids, tokenizer, args):
     total_comm_raw = 0.0
     total_comm_comp = 0.0
     """
@@ -298,6 +298,11 @@ def generate_with_distributed_sp(uav_node, bs_node, input_ids, tokenizer, args):
     print(f"Generated text: \033[91m{generated}\033[0m")
     print(f"Throughput: \033[91m{dsp_throughput:.2f}\033[0m tokens/s")
     print(f"Acceptance rate: {acceptance_rate:.3f}")
+    print(f"Total rounds: {rounds}")
+    print(f"Total accepted tokens: {correct_nums}")
+    print(f"Total rejected tokens: {reject_nums}")
+    print(f"Total proposed tokens: {rounds * args.gamma}")
+    print(f"Accept/Reject ratio: {correct_nums}/{reject_nums} = {correct_nums/max(reject_nums,1):.2f}")
     print(f"Communication time (raw logits)   : {total_comm_raw:.3f} s")
     print(f"Communication time (dist summary) : {total_comm_comp:.3f} s") 
     print(f"Time saved with dist summary      : {(total_comm_raw-total_comm_comp):.3f} s")
@@ -370,6 +375,9 @@ def generate_DSSD(uav_node: UAVNode, bs_node: BSNode, input_ids: torch.Tensor, t
             if flag == 1:
                 # 情况1：全部接受（flag=1）→ 基站返回x_{gamma+1}
                 new_prefix = torch.cat([x_draft, xj.to(uav_node.device)], dim=1)
+                # 检查是否超出限制
+                if new_prefix.shape[1] > max_total_len:
+                    new_prefix = new_prefix[:, :max_total_len]
                 # 下行传输内容：j=gamma+1（int） + xj（token）
                 down_bytes = 4 + xj.numel() * 4  # j占4字节，xj占4字节
             else:
@@ -378,8 +386,8 @@ def generate_DSSD(uav_node: UAVNode, bs_node: BSNode, input_ids: torch.Tensor, t
                 xj_prime = uav_node.resample_DSSD(j, pj, q_probs)
                 # 更新x_draft中的拒绝token（x_j→x_j'）
                 x_draft[:, prefix_len + j - 1] = xj_prime.to(x_draft.device)
-                # 新前缀：prefix + x_draft（含重新采样的x_j'）
-                new_prefix = x_draft
+                # 新前缀：前缀 + 接受的token + 重新采样的token
+                new_prefix = torch.cat([prefix, x_draft[:, prefix_len:prefix_len+j]], dim=1)
                 # 下行传输内容：j（int） + P_j分布（tensor）
                 down_bytes = 4 + tensor_nbytes(pj)  # j占4字节，pj占V*4字节（V为词表大小）
 
@@ -406,6 +414,11 @@ def generate_DSSD(uav_node: UAVNode, bs_node: BSNode, input_ids: torch.Tensor, t
     print(f"Generated text: \033[91m{generated}\033[0m")
     print(f"Throughput: \033[91m{throughput:.2f}\033[0m tokens/s")
     print(f"Acceptance rate: {acceptance_rate:.3f}")
+    print(f"Total rounds: {rounds}")
+    print(f"Total accepted tokens: {correct_num_total}")
+    print(f"Total rejected tokens: {reject_num_total}")
+    print(f"Total proposed tokens: {rounds * args.gamma}")
+    print(f"Accept/Reject ratio: {correct_num_total}/{reject_num_total} = {correct_num_total/max(reject_num_total,1):.2f}")
     print(f"Total communication delay: {total_comm_delay:.2f}s")
     print(f"Total SLM (device) time: {total_slm_time:.2f}s")
     print(f"Total LLM (BS) time: {total_llm_time:.2f}s")
@@ -430,7 +443,7 @@ def parse_arguments():
     parser.add_argument('--top_p', type=float, default=0)
     parser.add_argument('--csv_path', type=str, default="results.csv")
     parser.add_argument('--device_1', type=str, default="cuda:6")
-    parser.add_argument('--device_2', type=str, default="cuda:1")
+    parser.add_argument('--device_2', type=str, default="cuda:2")
     parser.add_argument('--device', type=str, default="cuda:0")
     parser.add_argument('--use_dist_summary', action='store_true', help='upload compressed distribution instead of raw logits')
     parser.add_argument('--no_cache', action='store_true', help='disable Δ-prompt cache (ablation)')
@@ -454,12 +467,12 @@ if __name__ == "__main__":
     bs_node = BSNode(target_model, device_2, args)
     
     # 执行DSSD
-    generated, dssd_throughput, total_time, acceptance_rate, total_comm, total_dup_bytes, \
-        rounds, total_slm, total_llm = generate_DSSD(uav_node, bs_node, input_ids, tokenizer, args) 
+    generated, dssd_throughput, total_time, acceptance_rate, total_comm, total_dup_bytes, rounds, total_slm, total_llm = \
+        generate_DSSD(uav_node, bs_node, input_ids, tokenizer, args) 
     
-    # # 执行分布式投机采样
-    # generated, dsp_throughput, dsp_time, acceptance_rate, total_comm, total_dup_bytes, rounds, total_slm, total_llm, total_comm_raw, total_comm_comp = \
-    #     generate_with_distributed_sp(uav_node, bs_node, input_ids, tokenizer, args)
+    # 执行分布式投机采样
+    generated, dsp_throughput, dsp_time, acceptance_rate, total_comm, total_dup_bytes, rounds, total_slm, total_llm, total_comm_raw, total_comm_comp = \
+        generate_DSD(uav_node, bs_node, input_ids, tokenizer, args)
     
     torch.cuda.empty_cache() 
     _prefix, t_ar_llm, tp_ar_llm = normal_generate(target_model, tokenizer, input_ids, device_2, args)
@@ -477,13 +490,16 @@ if __name__ == "__main__":
     recorder.add_entry(
         model_s = args.draft_model_name.rstrip('/').split('/')[-1],
         model_l = args.target_model_name.rstrip('/').split('/')[-1],
-        speedup = round(dssd_throughput/tp_ar_llm, 2),
-        b       = round(total_comm/max(t_ar_slm, 1e-4), 1),
-        c       = round(t_ar_slm/t_ar_llm, 1),
-        accept_rate = round(acceptance_rate, 3),
-            dsp_thr = round(dssd_throughput, 2),
-            base_thr= round(tp_ar_llm, 2),
-            slm_thr = round(tp_ar_slm, 2),
+        speedup_dssd = round(dssd_throughput/tp_ar_llm, 2),
+        speedup_dsp = round(dsp_throughput/tp_ar_llm, 2),
+        b_dssd = round(total_comm/max(t_ar_slm, 1e-4), 1),
+        c_dssd = round(t_ar_slm/t_ar_llm, 1),
+        accept_rate_dssd = round(acceptance_rate, 3),
+        b_dsp = round(total_comm/max(t_ar_slm, 1e-4), 1),
+        c_dsp = round(t_ar_slm/t_ar_llm, 1),
+        accept_rate_dsp = round(acceptance_rate, 3),
+        base_thr= round(tp_ar_llm, 2),
+        slm_thr = round(tp_ar_slm, 2),
             gamma   = args.gamma,
             rtt_ms  = args.rtt*1e3,
             bw_Mbps = args.bandwidth,
