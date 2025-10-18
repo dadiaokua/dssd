@@ -502,7 +502,7 @@ if __name__ == "__main__":
         slm_thr = round(tp_ar_slm, 2),
             gamma   = args.gamma,
             rtt_ms  = args.rtt*1e3,
-            bw_Mbps = args.bandwidth,
+            bw_Mbps = args.bandwidth,   
             prompt_len = args.max_len,
             t_ar_slm = round(t_ar_slm, 2),
             t_ar_llm = round(t_ar_llm, 2),
