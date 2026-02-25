@@ -1,9 +1,10 @@
 """
 dssd_utils.py - 共享工具函数（UAV端和BS端都需要）
-包含: 设备检测、采样函数、logits压缩等
+
+包含: 设备检测、采样函数、logits压缩、tensor工具
+（能耗监控已移至 energy_monitor.py）
 """
 
-import io
 import torch
 import torch.nn.functional as F
 

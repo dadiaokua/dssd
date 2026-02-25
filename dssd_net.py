@@ -39,21 +39,22 @@ def deserialize_message(data: bytes) -> dict:
     return msg
 
 
-def send_msg(sock: socket.socket, msg: dict):
-    """发送一条消息: 4字节长度头 + 序列化数据"""
+def send_msg(sock: socket.socket, msg: dict) -> int:
+    """发送一条消息: 4字节长度头 + 序列化数据。返回发送的总字节数。"""
     data = serialize_message(msg)
     length = struct.pack("!I", len(data))
     sock.sendall(length + data)
+    return 4 + len(data)
 
 
-def recv_msg(sock: socket.socket) -> dict:
-    """接收一条消息: 先读4字节长度头，再读数据"""
+def recv_msg(sock: socket.socket) -> tuple:
+    """接收一条消息: 先读4字节长度头，再读数据。返回 (msg_dict, total_bytes)。"""
     raw_len = _recv_exact(sock, 4)
     if not raw_len:
         raise ConnectionError("Connection closed by remote")
     msg_len = struct.unpack("!I", raw_len)[0]
     data = _recv_exact(sock, msg_len)
-    return deserialize_message(data)
+    return deserialize_message(data), 4 + msg_len
 
 
 def _recv_exact(sock: socket.socket, n: int) -> bytes:
@@ -102,7 +103,7 @@ class BSServer:
         try:
             while True:
                 try:
-                    request = recv_msg(conn)
+                    request, _ = recv_msg(conn)
                 except ConnectionError:
                     print("[BS Server] Client disconnected.")
                     break
@@ -115,7 +116,7 @@ class BSServer:
 
 
 class UAVClient:
-    """UAV 端 TCP 客户端封装"""
+    """UAV 端 TCP 客户端封装（带流量统计）"""
 
     def __init__(self, bs_host: str, bs_port: int = 50051):
         self.bs_host = bs_host
@@ -124,14 +125,38 @@ class UAVClient:
         self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         _try_set_bufsize(self.sock)
 
+        # 流量统计
+        self.total_tx_bytes = 0   # 累计上行字节数 (UAV → BS)
+        self.total_rx_bytes = 0   # 累计下行字节数 (BS → UAV)
+        self.call_count = 0       # RPC 调用次数
+
     def connect(self):
         self.sock.connect((self.bs_host, self.bs_port))
         print(f"[UAV Client] Connected to BS at {self.bs_host}:{self.bs_port}")
 
+    def reset_stats(self):
+        """重置流量统计（每个实验开始前调用）"""
+        self.total_tx_bytes = 0
+        self.total_rx_bytes = 0
+        self.call_count = 0
+
     def call(self, request: dict) -> dict:
-        """发送请求并等待响应（同步 RPC）"""
-        send_msg(self.sock, request)
-        return recv_msg(self.sock)
+        """发送请求并等待响应（同步 RPC），同时统计流量"""
+        tx = send_msg(self.sock, request)
+        response, rx = recv_msg(self.sock)
+        self.total_tx_bytes += tx
+        self.total_rx_bytes += rx
+        self.call_count += 1
+        return response
+
+    def get_traffic_stats(self) -> dict:
+        """获取当前流量统计"""
+        return {
+            "net_tx_bytes": self.total_tx_bytes,
+            "net_rx_bytes": self.total_rx_bytes,
+            "net_total_bytes": self.total_tx_bytes + self.total_rx_bytes,
+            "net_rpc_calls": self.call_count,
+        }
 
     def close(self):
         self.sock.close()
