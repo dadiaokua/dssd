@@ -24,3 +24,16 @@ About 1000 times better in the next five years? That seems impossible. But maybe
 The problem is that we're thinking the wrong way, in terms of linear progress. Moore's Law, after all, is the idea that computing power doubles every two years or so. That",6.002060035604418,13.328757047653198,0.2905405405405405,37,43,34,3.2160086631774902,10.093389749526978,,,
 baseline_ar,"Alan Turing theorized that computers would one day become 100% reliable and never make mistakes. In 1947, he wrote, “The idea of a computer making a mistake is a quite absurd one.” But as AI grows in power, can we trust the code that powers it?
 The answer is a complicated one. AI systems are often trained on large datasets, and they can make errors for a variety of reasons. For example",,,,,,,,,4.561526683656324,17.53798794746399,17.54246997833252
+DSSD,"Alan Turing theorized that computers would one day become 100 percent efficient in learning and processing data and information. He was a visionary, but his theory remained unverified until now. A recent study published in Nature Machine Intelligence has found that AI systems can indeed learn and process data with 100 percent efficiency. This breakthrough has the potential to revolutionize the field of artificial intelligence and open up a whole new world of possibilities.
+The study,",6.093852510872276,13.127984285354614,0.3382352941176471,34,46,29,2.9102303981781006,10.084352970123291,13.136,1.09,0.733,1.823,13.9,1579.2,44000,True,gpu (wall_time × TDP × load_factor),404578.5,30800.0,none,73006,44106071,44179077,1.11,420.63,421.74,wifi,405000.2,,,,,
+DSD,"Alan Turing theorized that computers would one day become 100% reliable. In
+the 1980s, a group of computer scientists worked to prove his theory.
+They were stunned when they found out that in the year 2000, a
+revolutionary method of building computers would be discovered. This
+method would make all known computer components obsolete. The
+revolutionary method is currently being developed in a secret lab",6.5660431647693605,12.183897972106934,0.3560606060606061,33,47,27,2.8094677925109863,9.35641884803772,12.185,1.228,0.397,1.625,13.3,1579.2,44000,True,gpu (wall_time × TDP × load_factor),375298.7,30800.0,none,80344569,42702,80387271,1225.96,0.41,1226.37,wifi,376525.1,,,,,
+baseline_remote_ar,"Alan Turing theorized that computers would one day become 60 percent of the human population. In 1990, he was only 30 percent of the way to his goal. If the rate of computer production has been constant since 1990, the approximate number of years from 1990 until Turing's goal isておく is... 1. The problem states that in 1990, computers made",,,,,,,,,,,,,,,,,,,,,1775,1981,3756,0.03,0.02,0.05,wifi,,4.554852641337312,17.563685655593872,17.570605039596558,,
+baseline_local_ar,"Alan Turing theorized that computers would one day become 100% efficient, but in reality, the first computers were designed to be 100% efficient. This is because of some ________.
+
+What's the answer?
+Possible answers: a) a) the first computers were designed to be 100% efficient. b) b) the first computers were designed to be 100% efficient. c) c)",53.65393735902711,,,,,,,,1.491,0.399,0.229,0.628,42.1,1579.2,44000,True,gpu (wall_time × TDP × load_factor),45925.3,30800.0,none,0,0,0,0.0,0.0,0.0,wifi,45925.3,,,1.4910368919372559,mlx,80

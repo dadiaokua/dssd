@@ -78,7 +78,7 @@ def _try_set_bufsize(sock: socket.socket, size: int = 4 * 1024 * 1024):
 
 
 class BSServer:
-    """BS 端 TCP 服务器封装"""
+    """BS 端 TCP 服务器封装（支持客户端断线重连 + handler 异常容错）"""
 
     def __init__(self, host: str = "0.0.0.0", port: int = 50051):
         self.host = host
@@ -89,50 +89,114 @@ class BSServer:
 
     def start(self, handler_fn):
         """
-        启动服务器，每收到一条请求就调用 handler_fn(request_dict) -> response_dict
-        handler_fn 由 bs_server.py 提供
+        启动服务器，循环接受客户端连接。
+        每收到一条请求就调用 handler_fn(request_dict) -> response_dict。
+        - handler_fn 抛异常时：向客户端返回 error 消息，继续服务
+        - 客户端断开时：回到 accept() 等待新连接
         """
         self.sock.bind((self.host, self.port))
         self.sock.listen(1)
         print(f"[BS Server] Listening on {self.host}:{self.port}")
 
-        conn, addr = self.sock.accept()
-        conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        print(f"[BS Server] UAV client connected from {addr}")
-
         try:
             while True:
+                print(f"[BS Server] Waiting for UAV client connection ...")
+                conn, addr = self.sock.accept()
+                conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                _try_set_bufsize(conn)
+                print(f"[BS Server] UAV client connected from {addr}")
+
+                self._serve_connection(conn, handler_fn)
+
+                print(f"[BS Server] Connection from {addr} closed, "
+                      f"ready for next client.")
+        except KeyboardInterrupt:
+            print("\n[BS Server] Shutting down (Ctrl+C).")
+        finally:
+            self.sock.close()
+
+    def _serve_connection(self, conn: socket.socket, handler_fn):
+        """持续处理单个连接上的请求，直到客户端断开"""
+        req_count = 0
+        try:
+            while True:
+                # 1. 接收请求
                 try:
                     request, _ = recv_msg(conn)
                 except ConnectionError:
-                    print("[BS Server] Client disconnected.")
-                    break
+                    print(f"[BS Server] Client disconnected after {req_count} requests.")
+                    return
 
-                response = handler_fn(request)
-                send_msg(conn, response)
+                # 2. 处理请求（handler 异常不会断连）
+                req_count += 1
+                try:
+                    response = handler_fn(request)
+                except Exception as e:
+                    print(f"[BS Server] ❌ Handler error on request #{req_count}: {e}")
+                    response = {"error": str(e)}
+
+                # 3. 发送响应
+                try:
+                    send_msg(conn, response)
+                except (BrokenPipeError, ConnectionError) as e:
+                    print(f"[BS Server] Failed to send response: {e}")
+                    return
         finally:
             conn.close()
-            self.sock.close()
 
 
 class UAVClient:
-    """UAV 端 TCP 客户端封装（带流量统计）"""
+    """UAV 端 TCP 客户端封装（带流量统计 + 自动重连）"""
 
-    def __init__(self, bs_host: str, bs_port: int = 50051):
+    def __init__(self, bs_host: str, bs_port: int = 50051,
+                 max_retries: int = 5, retry_delay: float = 2.0):
         self.bs_host = bs_host
         self.bs_port = bs_port
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        _try_set_bufsize(self.sock)
+        self.max_retries = max_retries
+        self.retry_delay = retry_delay
+        self.sock: socket.socket | None = None
 
         # 流量统计
         self.total_tx_bytes = 0   # 累计上行字节数 (UAV → BS)
         self.total_rx_bytes = 0   # 累计下行字节数 (BS → UAV)
         self.call_count = 0       # RPC 调用次数
 
+    def _create_socket(self) -> socket.socket:
+        """创建并配置新的 socket"""
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        _try_set_bufsize(s)
+        return s
+
     def connect(self):
+        """连接到 BS 服务器"""
+        self.sock = self._create_socket()
         self.sock.connect((self.bs_host, self.bs_port))
         print(f"[UAV Client] Connected to BS at {self.bs_host}:{self.bs_port}")
+
+    def _reconnect(self):
+        """关闭旧连接并重新建立"""
+        if self.sock is not None:
+            try:
+                self.sock.close()
+            except OSError:
+                pass
+        import time as _time
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                print(f"[UAV Client] Reconnecting to BS ... "
+                      f"(attempt {attempt}/{self.max_retries})")
+                self.sock = self._create_socket()
+                self.sock.connect((self.bs_host, self.bs_port))
+                print(f"[UAV Client] ✅ Reconnected to BS at "
+                      f"{self.bs_host}:{self.bs_port}")
+                return
+            except (ConnectionRefusedError, OSError) as e:
+                print(f"[UAV Client] Reconnect failed: {e}")
+                if attempt < self.max_retries:
+                    _time.sleep(self.retry_delay)
+        raise ConnectionError(
+            f"[UAV Client] Failed to reconnect after {self.max_retries} attempts")
 
     def reset_stats(self):
         """重置流量统计（每个实验开始前调用）"""
@@ -141,13 +205,25 @@ class UAVClient:
         self.call_count = 0
 
     def call(self, request: dict) -> dict:
-        """发送请求并等待响应（同步 RPC），同时统计流量"""
-        tx = send_msg(self.sock, request)
-        response, rx = recv_msg(self.sock)
-        self.total_tx_bytes += tx
-        self.total_rx_bytes += rx
-        self.call_count += 1
-        return response
+        """发送请求并等待响应（同步 RPC），同时统计流量。
+        遇到 Broken pipe / ConnectionError 时自动重连并重试一次。"""
+        for attempt in range(2):  # 最多尝试 2 次（原始 + 重连后重试）
+            try:
+                tx = send_msg(self.sock, request)
+                response, rx = recv_msg(self.sock)
+                # 检查 BS 端是否返回了错误
+                if "error" in response:
+                    raise RuntimeError(f"BS server error: {response['error']}")
+                self.total_tx_bytes += tx
+                self.total_rx_bytes += rx
+                self.call_count += 1
+                return response
+            except (BrokenPipeError, ConnectionError, OSError) as e:
+                if attempt == 0:
+                    print(f"[UAV Client] ⚠ Connection lost: {e}, reconnecting ...")
+                    self._reconnect()
+                else:
+                    raise
 
     def get_traffic_stats(self) -> dict:
         """获取当前流量统计"""
@@ -159,4 +235,8 @@ class UAVClient:
         }
 
     def close(self):
-        self.sock.close()
+        if self.sock is not None:
+            try:
+                self.sock.close()
+            except OSError:
+                pass

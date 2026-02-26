@@ -40,7 +40,9 @@ from decoding import (
     generate_DSSD,
     baseline_autoregressive,
     baseline_local_autoregressive,
+    run_benchmark,
     save_results,
+    BENCHMARK_PROMPTS,
 )
 
 
@@ -60,21 +62,32 @@ def main():
                         help="BS server IP address")
     parser.add_argument('--bs_port', type=int, default=50051,
                         help="BS server port")
-    parser.add_argument('--max_len', type=int, default=80)
+    parser.add_argument('--max_len', type=int, default=256,
+                        help="Maximum number of tokens to generate per request (default: 256)")
     parser.add_argument('--gamma', type=int, default=4)
     parser.add_argument('--seed', type=int, default=321)
     parser.add_argument('--temperature', type=float, default=0.7)
     parser.add_argument('--top_k', type=int, default=10)
     parser.add_argument('--top_p', type=float, default=0)
     parser.add_argument('--mode', type=str, default="all",
-                        choices=["dsd", "dssd", "baseline", "local_baseline", "all"],
+                        choices=["dsd", "dssd", "baseline", "local_baseline",
+                                 "all", "benchmark"],
                         help="Which mode to run: dsd, dssd, baseline (remote LLM), "
-                             "local_baseline (local SLM), or all")
+                             "local_baseline (local SLM), all (single run), "
+                             "or benchmark (multi-prompt multi-trial)")
     parser.add_argument('--csv_path', type=str, default="results_real_network.csv",
                         help="Path to save results CSV")
     parser.add_argument('--net_type', type=str, default="wifi",
                         choices=["wifi", "lte", "eth"],
                         help="Network type for energy estimation: wifi, lte, eth")
+    # ---------- Benchmark 参数 ----------
+    parser.add_argument('--num_trials', type=int, default=3,
+                        help="Number of repeated trials per prompt in benchmark mode (default: 3)")
+    parser.add_argument('--num_prompts', type=int, default=0,
+                        help="Number of prompts from built-in set (0 = use all, default: 0)")
+    parser.add_argument('--bench_modes', type=str, default=None,
+                        help="Comma-separated methods for benchmark, e.g. 'dssd,dsd,local_baseline'. "
+                             "Default: auto (all if BS connected, else local_baseline only)")
     args = parser.parse_args()
 
     # 根据设备自动选择框架，加载小模型
@@ -84,12 +97,17 @@ def main():
         framework=args.framework,
         args=args,
     )
-    input_ids = tokenizer.encode(args.input, return_tensors='pt')
 
     results = []
 
     # ---------- 需要 BS 连接的模式 ----------
-    need_bs = args.mode in ("dssd", "dsd", "baseline", "all")
+    need_bs = args.mode in ("dssd", "dsd", "baseline", "all", "benchmark")
+
+    if need_bs:
+        # benchmark 模式下如果只跑 local_baseline 则不需要连接
+        if args.mode == "benchmark" and args.bench_modes:
+            bench_mode_list = [m.strip() for m in args.bench_modes.split(",")]
+            need_bs = any(m in ("dssd", "dsd", "baseline") for m in bench_mode_list)
 
     if need_bs:
         client = UAVClient(bs_host=args.bs_addr, bs_port=args.bs_port)
@@ -98,36 +116,68 @@ def main():
         client = None
 
     try:
-        if args.mode in ("dssd", "all"):
-            print("\n" + "=" * 60)
-            print(" Running DSSD (Distributed Split Speculative Decoding)")
-            print("=" * 60)
-            r = generate_DSSD(uav_node, client, input_ids, tokenizer, args)
-            results.append(r)
+        # ==================== Benchmark 模式 ====================
+        if args.mode == "benchmark":
+            # 选择 prompts
+            prompts = BENCHMARK_PROMPTS
+            if args.num_prompts > 0:
+                prompts = prompts[:args.num_prompts]
 
-        if args.mode in ("dsd", "all"):
-            print("\n" + "=" * 60)
-            print(" Running DSD (Distributed Speculative Decoding)")
-            print("=" * 60)
-            r = generate_DSD(uav_node, client, input_ids, tokenizer, args)
-            results.append(r)
+            # 选择 modes
+            bench_modes = None
+            if args.bench_modes:
+                bench_modes = [m.strip() for m in args.bench_modes.split(",")]
 
-        if args.mode in ("baseline", "all"):
-            print("\n" + "=" * 60)
-            print(" Running Baseline (Remote LLM Autoregressive)")
-            print("=" * 60)
-            r = baseline_autoregressive(client, input_ids, tokenizer, args)
-            results.append(r)
+            all_raw, summaries = run_benchmark(
+                uav_node=uav_node,
+                client=client,
+                tokenizer=tokenizer,
+                args=args,
+                prompts=prompts,
+                num_trials=args.num_trials,
+                modes=bench_modes,
+            )
+            # 原始结果已在 run_benchmark 中逐条实时写入 *_raw.csv
 
-        if args.mode in ("local_baseline", "all"):
-            print("\n" + "=" * 60)
-            print(" Running Baseline (Local SLM Autoregressive)")
-            print("=" * 60)
-            r = baseline_local_autoregressive(uav_node, input_ids, tokenizer, args)
-            results.append(r)
+            # 保存汇总统计
+            if summaries:
+                summary_csv = args.csv_path.replace(".csv", "_summary.csv")
+                save_results(summaries, summary_csv)
 
-        if results:
-            save_results(results, args.csv_path)
+        # ==================== 单次模式 ====================
+        else:
+            input_ids = tokenizer.encode(args.input, return_tensors='pt')
+
+            if args.mode in ("dssd", "all"):
+                print("\n" + "=" * 60)
+                print(" Running DSSD (Distributed Split Speculative Decoding)")
+                print("=" * 60)
+                r = generate_DSSD(uav_node, client, input_ids, tokenizer, args)
+                results.append(r)
+
+            if args.mode in ("dsd", "all"):
+                print("\n" + "=" * 60)
+                print(" Running DSD (Distributed Speculative Decoding)")
+                print("=" * 60)
+                r = generate_DSD(uav_node, client, input_ids, tokenizer, args)
+                results.append(r)
+
+            if args.mode in ("baseline", "all"):
+                print("\n" + "=" * 60)
+                print(" Running Baseline (Remote LLM Autoregressive)")
+                print("=" * 60)
+                r = baseline_autoregressive(client, input_ids, tokenizer, args)
+                results.append(r)
+
+            if args.mode in ("local_baseline", "all"):
+                print("\n" + "=" * 60)
+                print(" Running Baseline (Local SLM Autoregressive)")
+                print("=" * 60)
+                r = baseline_local_autoregressive(uav_node, input_ids, tokenizer, args)
+                results.append(r)
+
+            if results:
+                save_results(results, args.csv_path)
 
     finally:
         if client is not None:

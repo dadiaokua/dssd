@@ -313,6 +313,10 @@ def main():
                         help="TCP server port")
     parser.add_argument('--verbose', action='store_true',
                         help="Print detailed logs")
+    parser.add_argument('--auto_restart', action='store_true',
+                        help="Auto-restart server on unexpected crash (model stays in memory)")
+    parser.add_argument('--max_restarts', type=int, default=10,
+                        help="Max auto-restart attempts (default: 10, 0=unlimited)")
     args = parser.parse_args()
     import os
     args.target_model_name = os.path.expanduser(args.target_model_name)
@@ -328,7 +332,7 @@ def main():
     else:
         print("[BS Server] No CUDA GPUs found, will use CPU")
 
-    # 加载模型
+    # 加载模型（只加载一次，重启时复用）
     print(f"\n[BS Server] Loading model: {args.target_model_name}")
     tokenizer = AutoTokenizer.from_pretrained(args.target_model_name)
     model, input_device = load_target_model(
@@ -341,8 +345,53 @@ def main():
 
     verifier = BSVerifier(model, input_device, tokenizer, verbose=args.verbose)
 
-    server = BSServer(host="0.0.0.0", port=args.port)
-    server.start(handler_fn=verifier.handle_request)
+    # ---------- 启动服务（带自动重启） ----------
+    restart_count = 0
+    max_restarts = args.max_restarts if args.max_restarts > 0 else float('inf')
+
+    while True:
+        try:
+            # 清理可能残留的 CUDA 缓存
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+            server = BSServer(host="0.0.0.0", port=args.port)
+            server.start(handler_fn=verifier.handle_request)
+
+            # start() 正常返回 = Ctrl+C 退出
+            print("[BS Server] Server stopped normally.")
+            break
+
+        except KeyboardInterrupt:
+            print("\n[BS Server] Shutting down (Ctrl+C).")
+            break
+
+        except Exception as e:
+            restart_count += 1
+            print(f"\n{'!'*60}")
+            print(f"[BS Server] ❌ Unexpected crash: {e}")
+
+            if not args.auto_restart:
+                print("[BS Server] Auto-restart is OFF. Exiting.")
+                print(f"  Tip: use --auto_restart to enable auto-recovery.")
+                break
+
+            if restart_count > max_restarts:
+                print(f"[BS Server] Reached max restarts ({args.max_restarts}). Exiting.")
+                break
+
+            # 清理 CUDA 缓存
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+            wait = min(5 * restart_count, 30)  # 递增等待，最多 30 秒
+            print(f"[BS Server] 🔄 Auto-restarting in {wait}s ... "
+                  f"(attempt {restart_count}/{args.max_restarts or '∞'})")
+            print(f"  Model stays in memory, no need to reload.")
+            print(f"{'!'*60}\n")
+            time.sleep(wait)
+
+    print("[BS Server] Bye.")
 
 
 if __name__ == "__main__":

@@ -6,12 +6,15 @@ decoding.py - 解码主循环与 Baseline
   - generate_DSSD(): 分布式拆分投机解码
   - baseline_autoregressive():       远程大模型自回归
   - baseline_local_autoregressive(): 本地小模型自回归
+  - run_benchmark():  多 prompt / 多轮 benchmark 并汇总统计
   - save_results():  CSV 结果保存
 """
 
 import csv
 import os
 import time
+import copy
+from collections import defaultdict
 
 import numpy as np
 import torch
@@ -20,6 +23,28 @@ from tqdm import tqdm
 from dssd_net import UAVClient
 from dssd_utils import sample
 from energy_monitor import EnergyMonitor
+
+
+# ============ Benchmark Prompt 集 ============
+# 覆盖不同领域/长度，保证实验的多样性和统计意义
+
+BENCHMARK_PROMPTS = [
+    # 科技 / 计算机
+    "Alan Turing theorized that computers would one day become ",
+    "The development of artificial intelligence has revolutionized ",
+    "In the field of machine learning, transformer architectures have ",
+    # 科学
+    "According to Einstein's theory of relativity, ",
+    "The process of photosynthesis in plants involves ",
+    # 社会 / 历史
+    "The Industrial Revolution fundamentally changed the way ",
+    "Throughout human history, the invention of writing has ",
+    # 工程 / 应用
+    "Edge computing enables real-time data processing by ",
+    "5G networks provide significantly higher bandwidth compared to ",
+    # 推理 / 数学
+    "If a train travels at 120 kilometers per hour for 3 hours, ",
+]
 
 
 # ============ DSD 主循环 ============
@@ -386,6 +411,187 @@ def baseline_local_autoregressive(uav_node, input_ids: torch.Tensor, tokenizer, 
         result[f"energy_{k}"] = v
     result["energy_total_mj"] = round(energy_stats["est_energy_mj"], 1)
     return result
+
+
+# ============ Benchmark 引擎 ============
+
+# 需要取平均的数值字段 (前缀匹配)
+_NUMERIC_KEYS = {
+    "throughput", "total_time", "acceptance_rate", "rounds",
+    "correct_nums", "reject_nums", "total_slm", "total_comm",
+    "wall_time", "bs_time", "bs_throughput", "generated_tokens",
+}
+
+
+def _is_numeric_key(k: str) -> bool:
+    """判断某个 key 是否应该做数值聚合"""
+    if k in _NUMERIC_KEYS:
+        return True
+    if k.startswith("energy_"):
+        return True
+    return False
+
+
+def _aggregate_results(results_list: list[dict]) -> dict:
+    """
+    对一组同方法的 result dict 做数值聚合：
+    返回 mean / std / min / max，以及非数值字段取第一个值。
+    """
+    if not results_list:
+        return {}
+
+    agg = {}
+    numeric_accum: dict[str, list[float]] = defaultdict(list)
+
+    for r in results_list:
+        for k, v in r.items():
+            if _is_numeric_key(k):
+                try:
+                    numeric_accum[k].append(float(v))
+                except (ValueError, TypeError):
+                    pass
+
+    # 非数值字段：取第一个
+    first = results_list[0]
+    for k, v in first.items():
+        if not _is_numeric_key(k):
+            agg[k] = v
+
+    # 数值字段：mean / std / min / max（跳过空数组）
+    for k, vals in numeric_accum.items():
+        if not vals:
+            continue
+        arr = np.array(vals)
+        agg[f"{k}_mean"] = round(float(arr.mean()), 4)
+        agg[f"{k}_std"] = round(float(arr.std(ddof=0)), 4)
+        agg[f"{k}_min"] = round(float(arr.min()), 4)
+        agg[f"{k}_max"] = round(float(arr.max()), 4)
+
+    agg["num_trials"] = len(results_list)
+    return agg
+
+
+def _append_one_result(result: dict, csv_path: str):
+    """将单条结果追加写入 CSV（每跑完一条就写，防止崩溃丢数据）"""
+    write_header = not os.path.exists(csv_path) or os.path.getsize(csv_path) == 0
+    keys = list(result.keys())
+    with open(csv_path, "a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=keys, extrasaction="ignore")
+        if write_header:
+            writer.writeheader()
+        writer.writerow(result)
+
+
+def run_benchmark(uav_node, client, tokenizer, args,
+                  prompts: list[str] | None = None,
+                  num_trials: int = 3,
+                  modes: list[str] | None = None):
+    """
+    多 prompt × 多轮 benchmark。
+
+    参数:
+      uav_node:   DraftNode (PyTorch / MLX)
+      client:     UAVClient (可以为 None，此时只跑 local_baseline)
+      tokenizer:  分词器
+      args:       CLI 参数 (需包含 max_len, gamma, seed 等)
+      prompts:    prompt 列表；None 则使用内置 BENCHMARK_PROMPTS
+      num_trials: 每个 prompt 重复次数
+      modes:      要跑的方法列表；None 则根据 client 是否存在自动决定
+
+    返回:
+      all_raw:   所有单次结果 [{...}, ...]
+      summaries: 按方法聚合后的统计 [{method, throughput_mean, ...}, ...]
+    """
+    if prompts is None:
+        prompts = BENCHMARK_PROMPTS
+    if modes is None:
+        if client is not None:
+            modes = ["dssd", "dsd", "baseline", "local_baseline"]
+        else:
+            modes = ["local_baseline"]
+
+    total_runs = len(prompts) * num_trials * len(modes)
+    print(f"\n{'#'*60}")
+    print(f"# BENCHMARK: {len(prompts)} prompts × {num_trials} trials × "
+          f"{len(modes)} modes = {total_runs} runs")
+    print(f"# max_len = {args.max_len}")
+    print(f"{'#'*60}\n")
+
+    # 原始结果 CSV 路径（每跑完一条立即写入，防崩溃丢数据）
+    raw_csv = args.csv_path.replace(".csv", "_raw.csv")
+
+    all_raw: list[dict] = []
+    # 按方法分组收集
+    by_method: dict[str, list[dict]] = defaultdict(list)
+
+    for pi, prompt in enumerate(prompts):
+        input_ids = tokenizer.encode(prompt, return_tensors='pt')
+        for trial in range(num_trials):
+            # 每轮用不同 seed 保证多样性
+            trial_args = copy.copy(args)
+            trial_args.seed = args.seed + trial * 1000 + pi
+
+            banner = (f"[Benchmark] prompt {pi+1}/{len(prompts)} "
+                      f"trial {trial+1}/{num_trials}")
+
+            for mode in modes:
+                print(f"\n{'='*60}")
+                print(f"{banner}  mode={mode}")
+                print(f"{'='*60}")
+
+                try:
+                    if mode == "dssd" and client is not None:
+                        r = generate_DSSD(uav_node, client, input_ids,
+                                          tokenizer, trial_args)
+                    elif mode == "dsd" and client is not None:
+                        r = generate_DSD(uav_node, client, input_ids,
+                                         tokenizer, trial_args)
+                    elif mode == "baseline" and client is not None:
+                        r = baseline_autoregressive(client, input_ids,
+                                                    tokenizer, trial_args)
+                    elif mode == "local_baseline":
+                        r = baseline_local_autoregressive(uav_node, input_ids,
+                                                          tokenizer, trial_args)
+                    else:
+                        print(f"  ⚠ Skipping mode={mode} (no BS connection)")
+                        continue
+                except Exception as e:
+                    print(f"  ❌ Error in {mode}: {e}")
+                    continue
+
+                r["prompt"] = prompt[:60] + ("..." if len(prompt) > 60 else "")
+                r["trial"] = trial + 1
+                all_raw.append(r)
+                by_method[r["method"]].append(r)
+
+                # ★ 每跑完一条立即写入 CSV，防止后续崩溃导致数据丢失
+                _append_one_result(r, raw_csv)
+
+    print(f"\n✅ All {len(all_raw)} raw results saved to {raw_csv}")
+
+    # 汇总统计
+    summaries: list[dict] = []
+    print(f"\n{'#'*60}")
+    print(f"# BENCHMARK SUMMARY ({len(all_raw)} successful runs)")
+    print(f"{'#'*60}")
+
+    for method_name, method_results in by_method.items():
+        agg = _aggregate_results(method_results)
+        agg["method"] = method_name + "_avg"
+        summaries.append(agg)
+
+        print(f"\n--- {method_name} ({len(method_results)} runs) ---")
+        # 打印核心指标
+        for metric in ["throughput", "total_time", "wall_time",
+                        "acceptance_rate", "energy_total_mj",
+                        "energy_est_energy_mj", "energy_net_total_energy_mj"]:
+            mean_key = f"{metric}_mean"
+            std_key = f"{metric}_std"
+            if mean_key in agg:
+                print(f"  {metric:>30s}: "
+                      f"{agg[mean_key]:>10.2f} ± {agg[std_key]:.2f}")
+
+    return all_raw, summaries
 
 
 # ============ 结果记录 ============
