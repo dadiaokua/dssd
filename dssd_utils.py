@@ -99,8 +99,6 @@ def sample(logits: torch.Tensor, temperature: float, top_k: int, top_p: float) -
     else:
         idx_next = torch.multinomial(probs, num_samples=1)
 
-    if idx_next.item() == 0:
-        raise RuntimeError("Sampled token id is 0 (usually <pad>)")
     return idx_next
 
 

@@ -298,7 +298,7 @@ class BSVerifier:
 
 def main():
     parser = argparse.ArgumentParser(description="BS (Base Station) Server")
-    parser.add_argument('--target_model_name', type=str, default="./LLM/opt-1.3b",
+    parser.add_argument('--target_model_name', type=str, default="~/model_hub/Qwen3-32B",
                         help="Path to the large (target) model")
     parser.add_argument('--device', type=str, default="auto",
                         help="Device: 'auto' (multi-GPU auto-split), 'cuda:0', 'cpu', etc.")
@@ -306,7 +306,7 @@ def main():
                         help="Comma-separated GPU IDs to use, e.g. '0,1,2' (only with --device auto)")
     parser.add_argument('--cpu_offload', action='store_true',
                         help="Enable CPU offload when GPU memory is insufficient (only with --device auto)")
-    parser.add_argument('--dtype', type=str, default="auto",
+    parser.add_argument('--dtype', type=str, default="fp16",
                         choices=["auto", "fp32", "fp16", "bf16"],
                         help="Model precision: auto, fp32, fp16, bf16")
     parser.add_argument('--port', type=int, default=50051,
@@ -314,6 +314,8 @@ def main():
     parser.add_argument('--verbose', action='store_true',
                         help="Print detailed logs")
     args = parser.parse_args()
+    import os
+    args.target_model_name = os.path.expanduser(args.target_model_name)
 
     # 打印 GPU 信息
     if torch.cuda.is_available():
@@ -321,7 +323,7 @@ def main():
         print(f"[BS Server] Found {n_gpus} GPU(s):")
         for i in range(n_gpus):
             name = torch.cuda.get_device_name(i)
-            mem = torch.cuda.get_device_properties(i).total_mem / (1024**3)
+            mem = torch.cuda.get_device_properties(i).total_memory / (1024**3)
             print(f"  GPU {i}: {name} ({mem:.1f} GB)")
     else:
         print("[BS Server] No CUDA GPUs found, will use CPU")
