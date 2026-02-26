@@ -83,6 +83,7 @@ DSSD-Efficient-Edge-Computing/
 ├── energy_monitor.py    # 能耗监控 (计算+网络)              ~480 行
 ├── dssd_utils.py        # 共享工具 (设备/采样/tensor)       ~120 行
 ├── dssd_net.py          # TCP 通信层 (零外部依赖)           ~165 行
+├── network_shaper.py    # OS 级网络限速 (macOS/Linux)      ~380 行
 │
 ├── main.py              # 原始单机模拟版本 (保留作参考)
 ├── speculative.py       # 原始投机解码工具函数 (保留作参考)
@@ -197,6 +198,12 @@ python uav_client.py --draft_model_name ./LLM/opt-125m --bs_addr 127.0.0.1
 | `--top_p` | `0` | Top-P (nucleus) 采样 |
 | `--net_type` | `wifi` | 网络类型: `wifi`, `lte`, `eth` |
 | `--csv_path` | `results_real_network.csv` | 结果输出路径 |
+| `--tc_enable` | `False` | 启用 OS 级网络限速 (需 sudo) |
+| `--tc_profile` | `None` | 预设网络场景 (覆盖下面 4 项) |
+| `--tc_bw` | `10mbit` | 带宽限制 |
+| `--tc_delay` | `50ms` | 单向延迟 (RTT ≈ 2x) |
+| `--tc_jitter` | `10ms` | 延迟抖动范围 |
+| `--tc_loss` | `0%` | 随机丢包率 |
 
 ### bs_server.py
 
@@ -281,6 +288,87 @@ UAV 与 BS 之间使用 **TCP + Pickle** 轻量通信，零外部依赖：
 | **DSD** | token IDs + 完整 logits | ~2.4 MB | 验证结果 + 修正 token | ~8 B |
 
 DSSD 将上行通信量从 **MB 级** 降低到 **字节级**，代价是下行需要传回 resample 用的概率分布。在上行带宽受限的边缘场景（如 UAV 通过 LTE 上行）中优势尤为明显。
+
+## 网络限速 (Traffic Shaping)
+
+为了在真实网络上模拟不同质量的通信链路（如 LTE 弱信号、UAV 远距离通信等），系统内置了 **OS 级流量整形** 工具，直接作用于 TCP 网络栈，比 `time.sleep()` 模拟更真实。
+
+### 原理
+
+| 平台 | 底层工具 | 说明 |
+|------|----------|------|
+| macOS | `dnctl` (dummynet) + `pfctl` | Packet Filter 内核模块 |
+| Linux | `tc` (Traffic Control) + `netem` | 内核网络调度器 |
+
+> ⚠️ 需要 sudo 权限。限速规则只影响指定端口的流量，不影响其他网络应用。
+
+### 使用方式
+
+```bash
+# 方式 1: 使用预设场景 (推荐)
+python uav_client.py \
+    --bs_addr 192.168.1.100 \
+    --tc_enable --tc_profile lte_fair \
+    --mode benchmark
+
+# 方式 2: 自定义参数
+python uav_client.py \
+    --bs_addr 192.168.1.100 \
+    --tc_enable \
+    --tc_bw 1mbit \
+    --tc_delay 50ms \
+    --tc_jitter 20ms \
+    --tc_loss 1% \
+    --mode all
+
+# 查看所有预设场景
+python uav_client.py --tc_list_profiles
+# 或
+python network_shaper.py list
+```
+
+### 预设网络场景
+
+| 场景名 | 带宽 | 延迟 | 抖动 | 丢包 | 描述 |
+|--------|------|------|------|------|------|
+| `wifi_good` | 50Mbps | 5ms | 2ms | 0% | 良好 WiFi (近距离) |
+| `wifi_fair` | 20Mbps | 15ms | 8ms | 0.5% | 一般 WiFi (有干扰) |
+| `wifi_poor` | 5Mbps | 40ms | 20ms | 2% | 差 WiFi (远距离) |
+| `lte_good` | 10Mbps | 30ms | 10ms | 0% | 良好 LTE |
+| `lte_fair` | 3Mbps | 60ms | 25ms | 1% | 一般 LTE |
+| `lte_poor` | 1Mbps | 100ms | 50ms | 3% | 差 LTE (信号弱) |
+| `5g_mmwave` | 100Mbps | 10ms | 3ms | 0% | 5G 毫米波 |
+| `5g_sub6` | 30Mbps | 20ms | 8ms | 0.5% | 5G Sub-6GHz |
+| `satellite` | 2Mbps | 300ms | 50ms | 1% | 卫星通信 (LEO) |
+| `uav_los` | 20Mbps | 10ms | 5ms | 0.5% | UAV 视距通信 |
+| `uav_nlos` | 2Mbps | 80ms | 40ms | 3% | UAV 非视距通信 |
+| `paper_sim` | 1Mbps | 50ms | 0ms | 0% | 论文模拟环境 |
+
+### 独立使用 (手动控制)
+
+```bash
+# 手动应用限速
+sudo python network_shaper.py apply --profile lte_poor --port 50051
+
+# 查看状态
+sudo python network_shaper.py status
+
+# 手动移除限速
+sudo python network_shaper.py remove --port 50051
+```
+
+### 与论文对比实验
+
+论文使用 `time.sleep()` 模拟低带宽高延迟环境。使用 `--tc_profile paper_sim` 可以在真实网络上复现类似条件：
+
+```bash
+# 复现论文的网络瓶颈场景
+python uav_client.py \
+    --bs_addr 192.168.1.100 \
+    --tc_enable --tc_profile paper_sim \
+    --net_type lte \
+    --mode benchmark --num_trials 5
+```
 
 ## 原始模拟版本
 

@@ -1,2 +1,2 @@
 ./results/
-./LLM/
+./LLM/__pycache__/

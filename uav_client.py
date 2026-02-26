@@ -44,6 +44,7 @@ from decoding import (
     save_results,
     BENCHMARK_PROMPTS,
 )
+from network_shaper import NetworkShaper, NETWORK_PROFILES
 
 
 def main():
@@ -88,7 +89,29 @@ def main():
     parser.add_argument('--bench_modes', type=str, default=None,
                         help="Comma-separated methods for benchmark, e.g. 'dssd,dsd,local_baseline'. "
                              "Default: auto (all if BS connected, else local_baseline only)")
+    # ---------- 网络限速 (Traffic Shaping) ----------
+    parser.add_argument('--tc_enable', action='store_true',
+                        help="Enable OS-level traffic shaping (requires sudo)")
+    parser.add_argument('--tc_profile', type=str, default=None,
+                        choices=list(NETWORK_PROFILES.keys()),
+                        help="Use a preset network profile (overrides tc_bw/tc_delay/tc_jitter/tc_loss). "
+                             "Run 'python network_shaper.py list' to see all profiles.")
+    parser.add_argument('--tc_bw', type=str, default="10mbit",
+                        help="Bandwidth limit (e.g. '1mbit', '500kbit', '50mbit'). Default: 10mbit")
+    parser.add_argument('--tc_delay', type=str, default="50ms",
+                        help="One-way delay (RTT ≈ 2x). e.g. '50ms', '100ms'. Default: 50ms")
+    parser.add_argument('--tc_jitter', type=str, default="10ms",
+                        help="Delay jitter range (e.g. '20ms' = delay ± 20ms). Default: 10ms")
+    parser.add_argument('--tc_loss', type=str, default="0%%",
+                        help="Packet loss rate (e.g. '1%%', '5%%'). Default: 0%%")
+    parser.add_argument('--tc_list_profiles', action='store_true',
+                        help="List available network profiles and exit")
     args = parser.parse_args()
+
+    # 如果只是列出 profiles 则打印后退出
+    if args.tc_list_profiles:
+        NetworkShaper.list_profiles()
+        return
 
     # 根据设备自动选择框架，加载小模型
     uav_node, tokenizer = create_draft_node(
@@ -99,6 +122,19 @@ def main():
     )
 
     results = []
+
+    # ---------- 网络限速 ----------
+    shaper = None
+    if args.tc_enable:
+        shaper = NetworkShaper(
+            bandwidth=args.tc_bw,
+            delay=args.tc_delay,
+            jitter=args.tc_jitter,
+            loss=args.tc_loss,
+            target_port=args.bs_port,
+            profile=args.tc_profile,
+        )
+        shaper.apply()
 
     # ---------- 需要 BS 连接的模式 ----------
     need_bs = args.mode in ("dssd", "dsd", "baseline", "all", "benchmark")
@@ -136,6 +172,7 @@ def main():
                 prompts=prompts,
                 num_trials=args.num_trials,
                 modes=bench_modes,
+                tc_config=shaper.get_config() if shaper else None,
             )
             # 原始结果已在 run_benchmark 中逐条实时写入 *_raw.csv
 
@@ -176,12 +213,20 @@ def main():
                 r = baseline_local_autoregressive(uav_node, input_ids, tokenizer, args)
                 results.append(r)
 
+            # 将网络限速配置写入每条结果
+            if shaper is not None:
+                tc_cfg = shaper.get_config()
+                for r in results:
+                    r.update(tc_cfg)
+
             if results:
                 save_results(results, args.csv_path)
 
     finally:
         if client is not None:
             client.close()
+        if shaper is not None:
+            shaper.remove()
         print("\n[UAV Client] Done.")
 
 

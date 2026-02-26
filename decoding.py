@@ -485,7 +485,8 @@ def _append_one_result(result: dict, csv_path: str):
 def run_benchmark(uav_node, client, tokenizer, args,
                   prompts: list[str] | None = None,
                   num_trials: int = 3,
-                  modes: list[str] | None = None):
+                  modes: list[str] | None = None,
+                  tc_config: dict | None = None):
     """
     多 prompt × 多轮 benchmark。
 
@@ -497,6 +498,7 @@ def run_benchmark(uav_node, client, tokenizer, args,
       prompts:    prompt 列表；None 则使用内置 BENCHMARK_PROMPTS
       num_trials: 每个 prompt 重复次数
       modes:      要跑的方法列表；None 则根据 client 是否存在自动决定
+      tc_config:  网络限速配置 (来自 NetworkShaper.get_config())
 
     返回:
       all_raw:   所有单次结果 [{...}, ...]
@@ -561,6 +563,9 @@ def run_benchmark(uav_node, client, tokenizer, args,
 
                 r["prompt"] = prompt[:60] + ("..." if len(prompt) > 60 else "")
                 r["trial"] = trial + 1
+                # 附加网络限速配置信息
+                if tc_config is not None:
+                    r.update(tc_config)
                 all_raw.append(r)
                 by_method[r["method"]].append(r)
 
