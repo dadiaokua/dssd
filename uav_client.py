@@ -52,7 +52,7 @@ def main():
     parser.add_argument('--input', type=str,
                         default="Alan Turing theorized that computers would one day become ")
     parser.add_argument('--draft_model_name', type=str,
-                        default="/Users/myrick/modelHub/hub/Qwen3-0.6B")
+                        default="/Users/myrick/modelHub/Qwen3-1.7B")
     parser.add_argument('--device', type=str, default="auto",
                         help="Device: 'auto' (cuda>mps>cpu), 'cuda:0', 'mps', 'cpu'")
     parser.add_argument('--framework', type=str, default="auto",
