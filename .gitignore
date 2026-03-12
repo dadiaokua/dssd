@@ -3,9 +3,15 @@ __pycache__/
 *.pyc
 *.pyo
 *.egg-info/
+*.egg
+dist/
+build/
 
 # Virtual environment
 venv/
+.venv/
+env/
+.env/
 
 # Output
 output/*.csv
@@ -20,7 +26,19 @@ LLM
 
 # IDE
 .vscode/
+.idea/
+*.swp
+*.swo
 
 # vLLM source (reference only)
 vllm/
+
+# Large dataset files
 dataset/WizardLM_evol_instruct_V2_196k/WizardLM_evol_instruct_V2_143k.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Misc
+*.log

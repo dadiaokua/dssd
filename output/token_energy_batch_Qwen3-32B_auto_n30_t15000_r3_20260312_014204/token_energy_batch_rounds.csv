@@ -1,0 +1,4 @@
+round,seed,total_generated,wall_time_s,throughput_tok_s,decode_mean_mj_per_token,prefill_total_mj,prefill_per_request_mj
+0,321,199948,1198.73,166.8,6866.48,782051.0,26068.37
+1,322,192830,1184.04,162.86,6871.45,711276.0,23709.2
+2,323,181828,1176.46,154.56,7620.65,596855.0,19895.17
