@@ -1,4 +1,6 @@
 import argparse
+import os, sys
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 from speculative import * 
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import torch

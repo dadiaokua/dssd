@@ -1,0 +1,2 @@
+round,seed,total_injected,total_generated,wall_time_s,throughput_tok_s,actual_req_rate,decode_mean_mj_per_token,max_position,num_steps
+0,321,150,1543084,2635.45,585.51,15.0,1226.22,11999,20345

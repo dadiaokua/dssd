@@ -1,2 +1,26 @@
-./results/
-./LLM/__pycache__/
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Virtual environment
+venv/
+
+# Output
+output/*.csv
+figures/*.png
+figures/token_energy/
+
+# Archive
+archive/
+
+# Model symlink
+LLM
+
+# IDE
+.vscode/
+
+# vLLM source (reference only)
+vllm/
+dataset/WizardLM_evol_instruct_V2_196k/WizardLM_evol_instruct_V2_143k.json

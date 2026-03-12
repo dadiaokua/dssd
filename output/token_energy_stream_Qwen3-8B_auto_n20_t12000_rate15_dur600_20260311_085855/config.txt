@@ -1,0 +1,38 @@
+Experiment: token_energy_stream_Qwen3-8B_auto_n20_t12000_rate15_dur600_20260311_085855
+Timestamp:  20260311_085855
+──────────────────────────────────────────────────
+  batch_repeats: 1
+  bench_modes: None
+  bs_addr: 127.0.0.1
+  bs_port: 50051
+  csv_path: /home/llm/github_project/dssd/output/token_energy_stream_Qwen3-8B_auto_n20_t12000_rate15_dur600_20260311_085855/results.csv
+  device: auto
+  draft_model_name: /home/llm/model_hub/Qwen3-8B
+  duration: 600
+  engine: auto
+  framework: auto
+  gamma: 4
+  gen_tokens: 64
+  gpu_ids: None
+  input: Alan Turing theorized that computers would one day become 
+  interactive: False
+  kv_lengths: 32,64,128,256,512,1024
+  max_len: 256
+  mode: token_energy_stream
+  net_type: wifi
+  num_prompts: 0
+  num_trials: 3
+  req_rate: 15.0
+  seed: 321
+  tc_bw: 10mbit
+  tc_delay: 50ms
+  tc_enable: False
+  tc_jitter: 10ms
+  tc_list_profiles: False
+  tc_loss: 0%%
+  tc_profile: None
+  temperature: 0.7
+  token_max_tokens: 12000
+  token_samples: 20
+  top_k: 10
+  top_p: 0
