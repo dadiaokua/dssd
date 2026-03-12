@@ -602,7 +602,7 @@ python scripts/uav_client.py \
 | 文件 | 内容 |
 |------|------|
 | `config.txt` | 完整实验参数记录 |
-| `token_energy_batch_per_position.csv` | 每个 position 的平均单 token 能耗 (多轮平均, 含 prefill 和 decode) |
+| `token_energy_batch_per_position.csv` | 每个 position 的平均单 token 能耗 (多轮平均; position -1 为 prefill, position 0 标记为 prefill_tail, position 1+ 为纯 decode) |
 | `token_energy_batch_step_raw.csv` | decode 阶段每个 step 的原始数据 (含 round 列, step 总能耗 + active 请求数 + per-token 能耗) |
 | `token_energy_batch_prefill.csv` | 每轮 prefill 的能耗 + 最后一行为多轮平均 |
 | `token_energy_batch_per_sample.csv` | 每轮每个请求的汇总 (含 round 列, 来源/prompt 长度/生成 token 数) |
@@ -628,8 +628,9 @@ decode_step,position,step_energy_mj,active_requests,per_token_energy_mj
 
 **预期结果解读**：
 
-- **Position 0 (prefill)**: 能耗最高，包含 prompt 的完整 attention 计算
-- **Position 1+** (decode): 每个 position 的能耗 = step 总能耗 / active 请求数
+- **Position -1 (prefill)**: 能耗最高，包含 prompt 的完整 attention 计算
+- **Position 0 (prefill_tail)**: prefill 完成后的第一个 decode step，能耗异常高（含 KV cache 写入、调度器切换等尾部开销），**不计入 decode 均值**
+- **Position 1+** (decode): 每个 position 的能耗 = step 总能耗 / active 请求数，这是纯 decode 能耗
 - **随 position 增长**: 能耗应缓慢上升（KV cache 增长 → attention 的 memory 读取量增加）
 - **当请求提前结束 (EOS)**: active 请求数减少，step 总能耗下降，但 per-token 能耗不受影响
 
@@ -648,7 +649,7 @@ decode_step,position,step_energy_mj,active_requests,per_token_energy_mj
 | 每个 position 的样本数 | 1 per round (所有请求共享) | 多个 (来自不同请求) |
 | 实验时长控制 | 由 max_tokens 决定 | 由 `--duration` 决定 |
 | Warmup 预热 | ❌ 不支持 | ✅ `--warmup N` 预注入 N 个请求 |
-| Prefill 能耗 | 包含 | ❌ **跳过**，只记录 decode |
+| Prefill 能耗 | Position 0 标记为 `prefill_tail`，不计入 decode 均值 | ❌ **跳过**，只记录 decode |
 | 场景 | 理想化的 batch 推理 | 更接近真实在线服务 |
 | 能耗归属 | step_energy / active_count → position | step_energy / decode_active_count → 各请求各自的 decode position |
 

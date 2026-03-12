@@ -913,17 +913,25 @@ def _run_single_batch(uav_node, tokenizer, args, prompts, all_token_ids,
     gen_counts = [r["generated_count"] for r in batch_results]
 
     # 计算 per-position per-token energy
-    pos_per_token = {}  # position → per_token_energy_mj
+    # ★ 跳过 position 0: 这是 prefill 完成后的第一个 decode step,
+    #   其能耗包含 prefill 的尾部开销 (KV cache 写入、调度器切换等),
+    #   不能准确反映纯 decode 能耗。与 stream 模式保持一致。
+    pos_per_token = {}       # position → per_token_energy_mj (包含 pos 0, 用于 CSV)
+    pos_per_token_decode = {}  # position → per_token_energy_mj (不含 pos 0, 用于均值)
     for step_idx, (pos, step_energy) in enumerate(decode_energies):
         active = sum(1 for gc in gen_counts if gc > pos)
         if active == 0:
             active = 1
-        pos_per_token[pos] = step_energy / active
+        per_token_e = step_energy / active
+        pos_per_token[pos] = per_token_e
+        if pos > 0:
+            pos_per_token_decode[pos] = per_token_e
 
     prefill_total = sum(e for _, e in prefill_energies)
     prefill_per_req = prefill_total / num_samples if num_samples > 0 else 0
 
-    decode_vals = list(pos_per_token.values())
+    # decode 均值: 不含 position 0
+    decode_vals = list(pos_per_token_decode.values())
     decode_mean = sum(decode_vals) / len(decode_vals) if decode_vals else 0
 
     print(f"  [Round {round_idx + 1}] Prefill: {step_info['prefill_steps']} steps, "
@@ -1134,19 +1142,29 @@ def run_token_energy_batch_benchmark(
             if not vals:
                 continue
             m = np.mean(vals)
-            all_per_token_vals.append(m)
             std = np.std(vals, ddof=1) if len(vals) > 1 else 0.0
             # active_requests: 用第一轮的 gen_counts 来估算 (各轮可能略有不同)
             active = sum(1 for gc in all_round_results[0]["gen_counts"] if gc > p)
             if active == 0:
                 active = 1
             step_e = m * active
-            writer.writerow([
-                p, round(m, 4), round(std, 4),
-                round(min(vals), 4), round(max(vals), 4),
-                len(vals), active, round(step_e, 4),
-                "decode",
-            ])
+
+            if p == 0:
+                # ★ Position 0 标记为 prefill_tail, 不计入 decode 均值
+                writer.writerow([
+                    p, round(m, 4), round(std, 4),
+                    round(min(vals), 4), round(max(vals), 4),
+                    len(vals), active, round(step_e, 4),
+                    "prefill_tail",
+                ])
+            else:
+                all_per_token_vals.append(m)
+                writer.writerow([
+                    p, round(m, 4), round(std, 4),
+                    round(min(vals), 4), round(max(vals), 4),
+                    len(vals), active, round(step_e, 4),
+                    "decode",
+                ])
     print(f"✅ Per-position energy saved to {token_csv}")
 
     # ---- 保存 per-sample summary (所有轮次) ----
