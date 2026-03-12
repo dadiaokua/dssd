@@ -15,7 +15,9 @@
 - [3. 实验结果](#3-实验结果)
   - [3.1 实验 A: 流式服务场景 (Qwen3-8B)](#31-实验-a-流式服务场景-qwen3-8b)
   - [3.2 实验 B: 并发批量场景 (Qwen3-32B)](#32-实验-b-并发批量场景-qwen3-32b)
-  - [3.3 跨模型对比分析](#33-跨模型对比分析)
+  - [3.3 实验 C: Batch Size Sweep (Qwen3-8B, max_num_seqs=40/60/100)](#33-实验-c-batch-size-sweep-qwen3-8b-max_num_seqs4060100)
+  - [3.4 跨模型对比分析](#34-跨模型对比分析)
+  - [3.5 跨 Batch Size 对比分析](#35-跨-batch-size-对比分析)
 - [4. 理论分析与验证](#4-理论分析与验证)
 - [5. 核心结论](#5-核心结论)
 - [6. 对未来工作的指导意义](#6-对未来工作的指导意义)
@@ -39,22 +41,25 @@
 2. 在真实的 vLLM 推理引擎中，这一效应是否可观测？
 3. 不同模型规模 (8B vs 32B) 的能耗增长模式是否一致？
 4. 在线服务场景（请求陆续到达）和离线批处理场景（请求同时开始）的能耗特征有何差异？
+5. **不同 batch size（并发度）对 per-token 能耗有什么影响？是否存在最优 batch size？**
 
-### 1.2 为什么选择这两个实验配置？
+### 1.2 为什么选择这三组实验配置？
 
-| 维度 | 实验 A (Stream) | 实验 B (Batch) |
-|------|-----------------|----------------|
-| **模型** | Qwen3-8B (8.2B 参数) | Qwen3-32B (32.5B 参数) |
-| **场景** | 模拟在线服务 | 离线批处理 |
-| **请求到达方式** | 20 req/min 持续注入 | 30 个请求同时提交 |
-| **最大生成长度** | 12,000 tokens | 15,000 tokens |
-| **实验时长** | 12,000s (3.3 小时) | ~1,200s × 3 轮 |
-| **Warmup** | 50 个预热请求 | 无 |
-| **Prefill 能耗** | 不记录 | 记录 |
+| 维度 | 实验 A (Stream) | 实验 B (Batch) | 实验 C (Batch Size Sweep) |
+|------|-----------------|----------------|--------------------------|
+| **模型** | Qwen3-8B | Qwen3-32B | Qwen3-8B |
+| **场景** | 模拟在线服务 | 离线批处理 | **不同 batch size 对比** |
+| **请求到达方式** | 20 req/min 持续注入 | 30 个请求同时提交 | 30 req/min，分别限制 max_num_seqs |
+| **最大生成长度** | 12,000 tokens | 15,000 tokens | 12,000 tokens |
+| **实验时长** | 12,000s (3.3 小时) | ~1,200s × 3 轮 | 1,800s × 3 轮 (每轮不同 batch size) |
+| **Batch Size 控制** | 不限制 | 固定 30 | **40 / 60 / 100** |
+| **Warmup** | 50 个预热请求 | 无 | 30 个预热请求 |
+| **Prefill 能耗** | 不记录 | 记录 | 不记录 |
 
-两个实验互补：
+三组实验互补：
 - **实验 A** 回答：在真实服务场景下，KV cache 效应是否可观测？
 - **实验 B** 回答：在理想化的 batch 对齐条件下，能耗增长的精确曲线是什么？
+- **实验 C** 回答：**batch size 如何影响 per-token 能耗和系统吞吐量？是否存在能耗-吞吐的最优权衡点？**
 
 ---
 
@@ -82,7 +87,7 @@ TDP:      300W per GPU
 
 ### 2.3 能耗测量方法
 
-#### 实验 A: Stream 模式
+#### 实验 A & C: Stream 模式
 
 ```
 每个 engine.step():
@@ -154,6 +159,29 @@ python scripts/uav_client.py \
 | 最大生成 | 15,000 tokens | 观察超长序列能耗变化 |
 | 重复轮次 | 3 | 不同 seed 取平均 |
 | Prompt Pool | 30 条 | 从 3 个数据集随机采样 |
+
+#### 实验 C: `token_energy_stream_Qwen3-8B` (Batch Size Sweep)
+
+```bash
+python scripts/uav_client.py \
+    --draft_model_name ~/model_hub/Qwen3-8B \
+    --device auto \
+    --mode token_energy_stream \
+    --req_rate 30 --duration 1800 --warmup 30 \
+    --token_max_tokens 12000 --token_samples 20 --seed 321 \
+    --stream_batch_sizes "40,60,100"
+```
+
+| 参数 | 值 | 说明 |
+|------|-----|------|
+| 模型 | Qwen3-8B | 同实验 A |
+| 注入速率 | 30 req/min | 每 2 秒注入一个请求 |
+| 实验时长 | 1,800s × 3 轮 | 每个 batch size 独立运行 30 分钟 |
+| 预热请求 | 30 | 快速填满 batch |
+| max_num_seqs | **40, 60, 100** | vLLM 调度器每个 batch 最多处理的请求数 |
+| 引擎重建 | 每轮独立子进程 | 避免 CUDA 上下文污染导致 spawn 死锁 |
+
+> **关键设计**: 通过控制 vLLM 的 `max_num_seqs` 参数，直接限制每个 step 中同时处理的最大请求数。三轮实验使用**完全相同的请求注入模式** (相同 seed, 相同 req_rate)，唯一变量是 batch size 上限。每轮在**独立子进程**中启动全新 vLLM 引擎，确保无 CUDA 状态残留。
 
 ---
 
@@ -313,9 +341,148 @@ $$E_{\text{decode}}(p) = 0.4331 \times p + 3939.5 \quad \text{(mJ/token)}$$
 
 ---
 
-### 3.3 跨模型对比分析
+### 3.3 实验 C: Batch Size Sweep (Qwen3-8B, max_num_seqs=40/60/100)
 
-#### 3.3.1 相同 Position 的能耗对比
+#### 3.3.1 实验设计
+
+实验 C 是本次新增的关键实验，旨在回答：**在相同模型、相同请求负载下，不同的 batch size 上限对能耗和吞吐量有什么影响？**
+
+通过 vLLM 的 `max_num_seqs` 参数，直接控制每个 step 中同时处理的最大请求数。三轮实验依次使用 max_num_seqs = 40, 60, 100，每轮在**独立子进程**中重新初始化 vLLM 引擎（避免 CUDA 上下文残留导致的 spawn 死锁问题）。
+
+#### 3.3.2 总体对比
+
+| 指标 | mns=40 | mns=60 | mns=100 |
+|------|--------|--------|---------|
+| 总注入请求 | 920 | 920 | 920 |
+| 总生成 tokens | 893,241 | 1,049,313 | 1,247,337 |
+| 吞吐量 (tok/s) | 496.1 | 582.8 | 692.8 |
+| Decode 均值 (mJ/token) | **1,681.2** | **1,483.5** | **1,096.7** |
+| 最大 position | 11,999 | 11,999 | 11,999 |
+| 总 steps | 22,548 | 18,033 | 13,770 |
+| Wall time | 1,800.4s | 1,800.4s | 1,800.4s |
+| 平均 GPU 功率 (8卡) | 821 W | 819 W | 746 W |
+| 能效 (tokens/Joule) | 0.59 | 0.67 | **0.91** |
+
+**关键发现**：
+
+- **吞吐量随 batch size 线性增长**: mns=100 的吞吐量是 mns=40 的 **1.40×**
+- **Per-token 能耗随 batch size 显著下降**: mns=100 仅为 mns=40 的 **65.2%**，节省 **34.8%** 能耗
+- **能效 (tokens/Joule) 提升 54%**: 从 0.59 (mns=40) 提升到 0.91 (mns=100)
+- **总 GPU 功率几乎不变**: 821W vs 746W，仅差 9%
+
+#### 3.3.3 能耗随 Position 的变化 (三组对比)
+
+> 📊 **图 9**: Per-token Decode Energy vs. Position (Qwen3-8B, mns=40)
+>
+> ![mns40_curve](../output/token_energy_stream_Qwen3-8B_auto_n20_t12000_rate30_dur1800_mns40-60-100_20260312_034702/mns_40/figures/token_energy_batch_curve.png)
+
+> 📊 **图 10**: Per-token Decode Energy vs. Position (Qwen3-8B, mns=60)
+>
+> ![mns60_curve](../output/token_energy_stream_Qwen3-8B_auto_n20_t12000_rate30_dur1800_mns40-60-100_20260312_034702/mns_60/figures/token_energy_batch_curve.png)
+
+> 📊 **图 11**: Per-token Decode Energy vs. Position (Qwen3-8B, mns=100)
+>
+> ![mns100_curve](../output/token_energy_stream_Qwen3-8B_auto_n20_t12000_rate30_dur1800_mns40-60-100_20260312_034702/mns_100/figures/token_energy_batch_curve.png)
+
+**三组 per-position 能耗详细对比**:
+
+| 区间 | mns=40 (mJ) | mns=60 (mJ) | mns=100 (mJ) | 100/40 比值 |
+|------|------------|------------|-------------|------------|
+| pos 1~100 | 1,496.5 | 1,403.6 | 1,115.0 | 0.75× |
+| pos 500~1000 | 1,341.7 | 1,157.1 | 946.8 | **0.71×** |
+| pos 2000~3000 | 1,468.6 | 1,156.7 | 807.6 | **0.55×** |
+| pos 5000~6000 | 1,716.9 | 1,463.9 | 1,048.2 | 0.61× |
+| pos 8000~9000 | 1,791.4 | 1,806.3 | 1,272.0 | 0.71× |
+| pos 10000~11000 | 1,915.1 | 1,713.7 | 1,349.6 | 0.70× |
+
+> **核心观察**: 在所有 position 区间，mns=100 的 per-token 能耗都显著低于 mns=40。在 pos 2000~3000 区间，mns=100 仅为 mns=40 的 **55%**，节能效果最为显著。
+
+#### 3.3.4 线性拟合对比
+
+三组实验的线性拟合结果 (pos 500 ~ 11,500):
+
+| 指标 | mns=40 | mns=60 | mns=100 |
+|------|--------|--------|---------|
+| 斜率 k (mJ/pos) | 0.0546 | 0.0760 | 0.0601 |
+| 截距 E₀ (mJ) | 1,355.6 | 1,031.0 | 726.8 |
+| R² | 0.8533 | 0.8538 | **0.9024** |
+| E(500) (mJ) | 1,382.9 | 1,069.0 | 756.9 |
+| E(11000) (mJ) | 1,955.9 | 1,866.8 | 1,387.7 |
+| 增长率 (500→11000) | 41.4% | 74.6% | **83.4%** |
+
+$$E_{\text{mns=40}}(p) = 0.0546p + 1355.6 \quad (R^2 = 0.85)$$
+
+$$E_{\text{mns=60}}(p) = 0.0760p + 1031.0 \quad (R^2 = 0.85)$$
+
+$$E_{\text{mns=100}}(p) = 0.0601p + 726.8 \quad (R^2 = 0.90)$$
+
+**分析**:
+
+1. **截距 E₀ 随 batch size 大幅下降**: 从 1,355.6 (mns=40) 降至 726.8 (mns=100)，下降 **46.4%**。截距代表模型权重读取的固定能耗在请求间的分摊——batch size 越大，固定开销被更多请求分摊
+2. **斜率 k 相对稳定**: 三组的斜率在 54.6~76.0 mJ/1000pos 范围内，没有随 batch size 显著变化。这符合预期：KV cache 的增量是 per-request 的，不受 batch size 影响
+3. **R² 在 mns=100 时最高 (0.90)**: 更大的 batch size 意味着更稳定的 GPU 利用率，减少了能耗波动
+
+#### 3.3.5 Step 级别能耗分析
+
+通过分析每个 step 的能耗和 active 请求数，可以揭示 batch size 对 GPU 效率的微观影响：
+
+**满载 (active == max_num_seqs) 时的 step 能耗**:
+
+| 指标 | mns=40 | mns=60 | mns=100 |
+|------|--------|--------|---------|
+| 满载 steps 数 | 21,827 (96.9%) | 16,570 (91.9%) | 10,833 (78.7%) |
+| Step 能耗 (mJ) | 66,379 ± 11,077 | 84,677 ± 19,327 | 109,624 ± 26,245 |
+| Per-token 能耗 (mJ) | 1,659.5 ± 276.9 | 1,411.3 ± 322.1 | 1,096.2 ± 262.4 |
+
+> 📊 **图 12**: Per-token Energy Distribution (Qwen3-8B, mns=40)
+>
+> ![mns40_dist](../output/token_energy_stream_Qwen3-8B_auto_n20_t12000_rate30_dur1800_mns40-60-100_20260312_034702/mns_40/figures/token_energy_distribution.png)
+
+> 📊 **图 13**: Per-token Energy Distribution (Qwen3-8B, mns=60)
+>
+> ![mns60_dist](../output/token_energy_stream_Qwen3-8B_auto_n20_t12000_rate30_dur1800_mns40-60-100_20260312_034702/mns_60/figures/token_energy_distribution.png)
+
+> 📊 **图 14**: Per-token Energy Distribution (Qwen3-8B, mns=100)
+>
+> ![mns100_dist](../output/token_energy_stream_Qwen3-8B_auto_n20_t12000_rate30_dur1800_mns40-60-100_20260312_034702/mns_100/figures/token_energy_distribution.png)
+
+#### 3.3.6 不同并发度下的 Per-token 能耗 (跨配置对比)
+
+一个极具洞察力的分析是：**在不同 max_num_seqs 配置下，当实际 active 请求数相同时，per-token 能耗是否一致？**
+
+**active=40 时的 per-token 能耗**:
+
+| 配置 | Steps 数 | Step 能耗 (mJ) | Per-token 能耗 (mJ) |
+|------|---------|---------------|-------------------|
+| mns=40 (满载) | 21,827 | 66,379 | **1,659.5** |
+| mns=60 (部分) | 32 | 49,676 | **1,241.9** |
+| mns=100 (部分) | 35 | 44,728 | **1,118.2** |
+
+> **重要发现**: 即使实际 active 请求数都是 40，mns=100 配置下的 per-token 能耗 (1,118 mJ) 比 mns=40 配置 (1,660 mJ) **低 32.6%**！
+
+这一差异的原因是：在 mns=40 配置中，active=40 对应的是**满载稳态**，此时请求处于各种不同的 position（有的在 pos 100，有的在 pos 8000），**KV cache 大小的分布范围很广**。而在 mns=100 配置中，active=40 只发生在**请求尚未填满 batch 的早期阶段**（warmup 刚注入 40 个请求时），此时所有请求的 position 都较低，KV cache 较小。
+
+这证实了一个关键结论：**per-token 能耗不仅取决于当前 batch 中的请求数，还取决于这些请求的 KV cache 大小分布。**
+
+#### 3.3.7 累积能耗对比
+
+> 📊 **图 15**: Cumulative Decode Energy (Qwen3-8B, mns=40)
+>
+> ![mns40_cum](../output/token_energy_stream_Qwen3-8B_auto_n20_t12000_rate30_dur1800_mns40-60-100_20260312_034702/mns_40/figures/token_energy_cumulative.png)
+
+> 📊 **图 16**: Cumulative Decode Energy (Qwen3-8B, mns=60)
+>
+> ![mns60_cum](../output/token_energy_stream_Qwen3-8B_auto_n20_t12000_rate30_dur1800_mns40-60-100_20260312_034702/mns_60/figures/token_energy_cumulative.png)
+
+> 📊 **图 17**: Cumulative Decode Energy (Qwen3-8B, mns=100)
+>
+> ![mns100_cum](../output/token_energy_stream_Qwen3-8B_auto_n20_t12000_rate30_dur1800_mns40-60-100_20260312_034702/mns_100/figures/token_energy_cumulative.png)
+
+---
+
+### 3.4 跨模型对比分析
+
+#### 3.4.1 相同 Position 的能耗对比
 
 | Position | Qwen3-8B (mJ) | Qwen3-32B (mJ) | 32B/8B 比值 |
 |----------|---------------|-----------------|-------------|
@@ -328,10 +495,10 @@ $$E_{\text{decode}}(p) = 0.4331 \times p + 3939.5 \quad \text{(mJ/token)}$$
 
 > 32B/8B 的能耗比值约为 **3.5× ~ 5.5×**，与模型参数量比值 (32.5B/8.2B = **3.96×**) 基本吻合。
 
-#### 3.3.2 能耗增长斜率对比
+#### 3.4.2 能耗增长斜率对比
 
-| 指标 | Qwen3-8B (Stream) | Qwen3-32B (Batch) | 比值 |
-|------|-------------------|-------------------|------|
+| 指标 | Qwen3-8B (Stream A) | Qwen3-32B (Batch B) | 比值 |
+|------|---------------------|---------------------|------|
 | 斜率 (mJ/1000 pos) | 106.5 | 433.1 | **4.07×** |
 | 基线能耗 (mJ, 拟合截距) | 698.7 | 3,939.5 | 5.64× |
 | 相对增长率 (/1000 pos) | 15.2% | 11.0% | 0.72× |
@@ -342,6 +509,71 @@ $$E_{\text{decode}}(p) = 0.4331 \times p + 3939.5 \quad \text{(mJ/token)}$$
 1. **绝对斜率比值 (4.07×)** 接近模型参数量比值 (3.96×)，说明能耗增长的绝对量与模型规模成正比
 2. **相对增长率**: 8B 模型的相对增长率 (15.2%/1000 pos) 反而**高于** 32B (11.0%/1000 pos)，因为 8B 的基线能耗更低，KV cache 增长的相对影响更大
 3. **R² 差异**: Batch 模式 (0.95) 比 Stream 模式 (0.83) 更高，因为 batch 中 position 完全对齐，消除了并发度波动的噪声
+
+---
+
+### 3.5 跨 Batch Size 对比分析
+
+#### 3.5.1 能耗-吞吐量权衡
+
+将实验 C 的三组数据与实验 A 放在一起，可以清晰看到 batch size 对系统效率的影响：
+
+| 配置 | Batch Size | 吞吐量 (tok/s) | Per-token E (mJ) | 能效 (tok/J) | 相对 mns=40 吞吐 | 相对 mns=40 能耗 |
+|------|-----------|----------------|-----------------|-------------|-----------------|-----------------|
+| 实验 C (mns=40) | 40 | 496.1 | 1,681.2 | 0.59 | 1.00× | 1.00× |
+| 实验 C (mns=60) | 60 | 582.8 | 1,483.5 | 0.67 | 1.17× | 0.88× |
+| 实验 C (mns=100) | 100 | 692.8 | 1,096.7 | 0.91 | 1.40× | 0.65× |
+| 实验 A (不限) | ~不限 | 615.9 | 849.7* | — | 1.24× | — |
+
+\* 实验 A 的 per-token 能耗取 pos 500~1000 区间的均值，因为实验 A 的请求注入率和时长不同，整体均值不直接可比。
+
+#### 3.5.2 Batch Size 对固定开销分摊的影响
+
+从线性拟合的截距 E₀ 可以看到固定开销的分摊效果：
+
+$$\text{分摊效率} = \frac{E_0(\text{mns=40})}{E_0(\text{mns=}N)}$$
+
+| Batch Size | E₀ (mJ) | 分摊效率 | 理论分摊 (40/N) |
+|-----------|---------|---------|----------------|
+| 40 | 1,355.6 | 1.00× | 1.00× |
+| 60 | 1,031.0 | 1.31× | 1.50× |
+| 100 | 726.8 | **1.87×** | 2.50× |
+
+> 实际分摊效率低于理论值 (1.87× vs 2.50×)，说明 batch size 增大带来的 step 能耗增加并非完全可忽略。但分摊效果依然非常显著。
+
+#### 3.5.3 Batch Size 对 KV Cache 能耗斜率的影响
+
+| Batch Size | 斜率 k (mJ/1000pos) | 解释 |
+|-----------|---------------------|------|
+| 40 | 54.6 | 基准 |
+| 60 | 76.0 | +39.2% |
+| 100 | 60.1 | +10.1% |
+
+三组的斜率没有呈现清晰的单调趋势，而是在 54.6 ~ 76.0 mJ/1000pos 范围内波动。这符合理论预期：**KV cache 的增量能耗是 per-request 的**，每个请求的 KV cache 增长速率不受 batch size 影响。斜率的波动主要来自：
+
+1. **并发度变化时的混叠效应**: 当有请求完成并被新请求替换时，新请求的 position 较低，拉低了该 step 的平均 per-token 能耗
+2. **vLLM 调度器的 chunked prefill**: 新请求的 prefill 和 decode 可能在同一 step 中执行，影响能耗分配
+
+#### 3.5.4 为什么更大的 Batch Size 更节能？
+
+从 step 级别的数据可以看到核心机制：
+
+```
+mns=40:  Step 能耗 = 66,379 mJ,  per-token = 66,379/40  = 1,659 mJ
+mns=60:  Step 能耗 = 84,677 mJ,  per-token = 84,677/60  = 1,411 mJ
+mns=100: Step 能耗 = 109,624 mJ, per-token = 109,624/100 = 1,096 mJ
+```
+
+**Step 能耗的增长速度远低于 batch size 的增长速度**：
+
+- mns 从 40 → 100 (2.5×)，Step 能耗从 66K → 110K (仅 **1.65×**)
+- 因此 per-token 能耗下降了 **34.8%**
+
+这一现象的物理解释是：
+
+1. **模型权重读取是共享的**: 无论 batch 中有多少请求，每个 step 只需从 HBM 读取一次模型权重 (~1.91 GB/GPU for 8B)。这部分能耗被 batch 中所有请求分摊
+2. **Attention 计算的 batch 效率**: GPU 的 Tensor Core 在处理更大的矩阵时效率更高 (更好的 SM 利用率)
+3. **固定开销分摊**: step 调度、NCCL 通信、kernel launch 等固定开销被更多 token 分摊
 
 ---
 
@@ -376,13 +608,37 @@ $$M_{\text{KV}}(p) = 2 \times N_{\text{KV\_heads}} \times d_{\text{head}} \times
 | Qwen3-8B | 0.45% | 1.80% | 4.50% | **9.89%** |
 | Qwen3-32B | 0.20% | 0.81% | 2.02% | 5.65% |
 
-### 4.2 为什么实测斜率远大于纯 HBM 能耗预测？
+### 4.2 Batch Size 对内存访问的影响
+
+在 batch decode 中，每个 step 的 HBM 读取量为：
+
+$$M_{\text{step}}(B, p_1, ..., p_B) = M_{\text{weight}} + \sum_{i=1}^{B} M_{\text{KV}}(p_i)$$
+
+Per-token 能耗为：
+
+$$E_{\text{token}} = \frac{E_{\text{step}}}{B} \approx \frac{E_{\text{weight}}}{B} + \overline{E_{\text{KV}}}$$
+
+其中 $E_{\text{weight}}/B$ 随 batch size 增大而线性下降，$\overline{E_{\text{KV}}}$ 是每个请求自身 KV cache 的平均能耗。
+
+**理论预测 vs 实测**:
+
+以 Qwen3-8B 为例，假设权重读取能耗约为截距的主要成分：
+
+| 从 mns=40 到 mns=100 | 理论 | 实测 |
+|---------------------|------|------|
+| E₀ 下降比例 | 1 - 40/100 = **60%** | 1 - 726.8/1355.6 = **46.4%** |
+
+实测下降幅度略小于理论值，原因是：
+- 截距 E₀ 不完全等于权重读取能耗，还包含其他与 batch size 无关的开销
+- 更大的 batch 意味着更多的 KV cache 总量需要读取，增加了 step 的内存带宽压力
+
+### 4.3 为什么实测斜率远大于纯 HBM 能耗预测？
 
 使用 HBM2 的理论能耗 (12.8 pJ/Byte) 计算 KV cache 增长带来的纯 HBM 能耗增量：
 
 | 模型 | 预测 ΔE (mJ/1000 pos) | 实测 ΔE (mJ/1000 pos) | 比值 |
 |------|----------------------|----------------------|------|
-| Qwen3-8B | 1.89 | 106.5 | **56×** |
+| Qwen3-8B | 1.89 | 106.5 (实验 A) | **56×** |
 | Qwen3-32B | 3.36 | 433.1 | **129×** |
 
 实测值远大于纯 HBM 能耗预测，原因如下：
@@ -400,7 +656,7 @@ $$M_{\text{KV}}(p) = 2 \times N_{\text{KV\_heads}} \times d_{\text{head}} \times
 
 3. **执行时间延长的静态功耗**：KV cache 增长导致每个 step 的执行时间变长，在此期间 GPU 的静态功耗 (idle power) 也在消耗能量
 
-### 4.3 模型规模与能耗斜率的关系
+### 4.4 模型规模与能耗斜率的关系
 
 | 比较维度 | Qwen3-8B | Qwen3-32B | 比值 |
 |---------|----------|-----------|------|
@@ -418,23 +674,27 @@ $$M_{\text{KV}}(p) = 2 \times N_{\text{KV\_heads}} \times d_{\text{head}} \times
 
 ### 结论 1: Decode 阶段的 per-token 能耗随 KV cache 长度线性增长
 
-两个实验一致表明，decode 阶段的 per-token GPU 能耗与已生成的 token 数量 (position) 呈**线性关系**：
+三组实验一致表明，decode 阶段的 per-token GPU 能耗与已生成的 token 数量 (position) 呈**线性关系**：
 
 $$E_{\text{token}}(p) = k \times p + E_0$$
 
 其中 $k$ (斜率) 反映 KV cache 增长的边际能耗，$E_0$ (截距) 反映模型权重读取的固定能耗。
 
-| 模型 | k (mJ/pos) | E₀ (mJ) | R² |
-|------|-----------|---------|-----|
-| Qwen3-8B | 0.1065 | 698.7 | 0.83 |
-| Qwen3-32B | 0.4331 | 3,939.5 | 0.95 |
+| 实验 | 模型 | Batch Size | k (mJ/pos) | E₀ (mJ) | R² |
+|------|------|-----------|-----------|---------|-----|
+| A (Stream) | Qwen3-8B | ~不限 | 0.1065 | 698.7 | 0.83 |
+| B (Batch) | Qwen3-32B | 30 | 0.4331 | 3,939.5 | 0.95 |
+| C (mns=40) | Qwen3-8B | 40 | 0.0546 | 1,355.6 | 0.85 |
+| C (mns=60) | Qwen3-8B | 60 | 0.0760 | 1,031.0 | 0.85 |
+| C (mns=100) | Qwen3-8B | 100 | 0.0601 | 726.8 | **0.90** |
 
 ### 结论 2: 能耗增长幅度显著
 
 在实际的长序列生成中，KV cache 导致的能耗增长**不可忽视**：
 
-- **Qwen3-8B**: 从 pos 500 到 pos 11,000，能耗增长 **148.7%** (852 → 1,870 mJ)
-- **Qwen3-32B**: 从 pos 500 到 pos 14,000，能耗增长 **140.7%** (4,156 → 10,003 mJ)
+- **Qwen3-8B (实验 A)**: 从 pos 500 到 pos 11,000，能耗增长 **148.7%** (852 → 1,870 mJ)
+- **Qwen3-32B (实验 B)**: 从 pos 500 到 pos 14,000，能耗增长 **140.7%** (4,156 → 10,003 mJ)
+- **Qwen3-8B mns=100 (实验 C)**: 从 pos 500 到 pos 11,000，能耗增长 **83.4%** (757 → 1,388 mJ)
 
 ### 结论 3: 能耗增长的绝对量与模型规模成正比
 
@@ -448,10 +708,33 @@ $$E_{\text{token}}(p) = k \times p + E_0$$
 
 | 模式 | R² | 原因 |
 |------|-----|------|
-| Batch | 0.9530 | Position 完全对齐，无并发度波动 |
-| Stream | 0.8325 | 不同请求在同一 step 处于不同 position，并发度有波动 |
+| Batch (实验 B) | 0.9530 | Position 完全对齐，无并发度波动 |
+| Stream (实验 A) | 0.8325 | 不同请求在同一 step 处于不同 position，并发度有波动 |
+| Stream mns=100 (实验 C) | 0.9024 | 大 batch size 带来更稳定的 GPU 利用率 |
 
-Batch 模式更适合精确测量能耗-position 关系；Stream 模式更接近真实场景。
+Batch 模式更适合精确测量能耗-position 关系；Stream 模式更接近真实场景。值得注意的是，**更大的 batch size 可以提高 stream 模式的 R²**。
+
+### 结论 6: 更大的 Batch Size 显著降低 Per-token 能耗 ⭐ (新)
+
+| 指标 | mns=40 → mns=100 变化 |
+|------|---------------------|
+| 吞吐量 | +39.6% (496 → 693 tok/s) |
+| Per-token 能耗 | **-34.8%** (1,681 → 1,097 mJ) |
+| 能效 (tok/J) | **+54.2%** (0.59 → 0.91) |
+| 总 GPU 功率 | -9.1% (821 → 746 W) |
+
+**核心机制**: 模型权重读取 (~1.91 GB/GPU) 是每个 step 的固定开销，batch size 越大，这部分开销被更多请求分摊。Step 总能耗增长 (1.65×) 远低于 batch size 增长 (2.5×)，导致 per-token 能耗大幅下降。
+
+### 结论 7: Per-token 能耗同时取决于 Batch Size 和 KV Cache 分布 ⭐ (新)
+
+即使 active 请求数相同 (如 active=40)，不同 max_num_seqs 配置下的 per-token 能耗也不同：
+
+| 配置 | active=40 时 Per-token E (mJ) | 原因 |
+|------|------------------------------|------|
+| mns=40 (满载) | 1,659.5 | 请求处于各种 position，KV cache 大小分布广 |
+| mns=100 (部分) | 1,118.2 | 仅在早期出现，所有请求 position 较低 |
+
+这证明 **per-token 能耗是 batch size 和 KV cache 大小分布的函数**，不能简单地用 `step_energy / active_requests` 来建模。
 
 ---
 
@@ -465,7 +748,20 @@ Batch 模式更适合精确测量能耗-position 关系；Stream 模式更接近
 - 在能耗受限的边缘设备 (如 UAV) 上，可以设置**动态 max_tokens 上限**：当预估的剩余能量不足以支撑后续高能耗 token 时，提前终止生成
 - 能耗预算公式: $E_{\text{total}} = \sum_{p=0}^{L} (k \cdot p + E_0) = k \cdot \frac{L(L+1)}{2} + E_0 \cdot L$
 
-### 6.2 KV Cache 压缩的能耗收益量化
+### 6.2 Batch Size 优化策略 ⭐ (新)
+
+**发现**: batch size 从 40 增加到 100，per-token 能耗下降 34.8%，吞吐量提升 39.6%。
+
+**指导**:
+- **尽可能使用更大的 batch size**: 在 GPU 显存允许的范围内，增大 `max_num_seqs` 可以同时提升吞吐量和能效
+- **动态 batch size 调整**: 在请求负载较低时，可以适当等待积累更多请求再一起处理，以获得更好的 batch 效率
+- **能耗-延迟权衡**: 更大的 batch size 虽然降低了 per-token 能耗，但可能增加单个请求的端到端延迟 (因为需要等待 batch 填满)。在实时性要求高的场景下需要平衡
+
+**量化收益** (以 Qwen3-8B 为例):
+- 每增加 1 个 batch size (从 40 开始)，per-token 能耗约下降 **9.7 mJ** (约 0.58%)
+- 在 1800 秒实验中，mns=100 比 mns=40 多生成了 **354,096 个 token** (+39.6%)
+
+### 6.3 KV Cache 压缩的能耗收益量化
 
 **发现**: 能耗增长的根源是 KV cache 的线性膨胀。
 
@@ -474,7 +770,7 @@ Batch 模式更适合精确测量能耗-position 关系；Stream 模式更接近
 - 例如，将 KV cache 压缩 50%，预期能耗斜率也减少约 50%
 - 对于 Qwen3-32B，如果能将斜率从 433 mJ/1000pos 降至 216 mJ/1000pos，在 pos 14000 处可节省 **3,038 mJ/token**
 
-### 6.3 投机解码 (Speculative Decoding) 的能耗优化
+### 6.4 投机解码 (Speculative Decoding) 的能耗优化
 
 **发现**: 小模型的相对能耗增长率更高 (15.2% vs 11.0%)。
 
@@ -483,7 +779,18 @@ Batch 模式更适合精确测量能耗-position 关系；Stream 模式更接近
 - 如果 draft 模型在长序列上的能耗增长比例更大，那么投机解码在**长序列场景下的能耗优势会进一步放大**
 - 可以设计**自适应 γ**: 在序列早期使用较大的 γ (能耗差距小)，在序列后期使用较小的 γ (能耗差距大，减少 draft 模型的浪费)
 
-### 6.4 模型选型的能耗-性能权衡
+### 6.5 Batch Size 感知的 Speculative Decoding ⭐ (新)
+
+**发现**: batch size 对 per-token 能耗有显著影响 (mns=100 比 mns=40 节省 35%)。
+
+**指导**:
+- 在 DSSD 架构中，draft 模型和 target 模型可能运行在不同的 batch size 下
+- **draft 模型 (小模型)** 由于参数量小，权重读取的固定开销低，batch size 的分摊效应相对较弱
+- **target 模型 (大模型)** 权重读取开销大，batch size 分摊效应更强
+- 因此，**在大模型端尽可能增大 batch size** 的能耗收益更大
+- 可以设计 **异步 batch 策略**: draft 模型快速生成多组候选，target 模型积累到足够大的 batch 后一次性验证
+
+### 6.6 模型选型的能耗-性能权衡
 
 **发现**: 32B 模型的 per-token 能耗是 8B 的 ~5×，但能力更强。
 
@@ -492,7 +799,7 @@ Batch 模式更适合精确测量能耗-position 关系；Stream 模式更接近
 - 对于长序列 (> 10000 tokens)，KV cache 的额外能耗使得总能耗比值进一步增大
 - 在能耗受限场景下，应优先考虑使用小模型 + 更多 token，而非大模型 + 更少 token
 
-### 6.5 硬件选型参考
+### 6.7 硬件选型参考
 
 **发现**: 实测能耗斜率远大于纯 HBM 理论值 (56× ~ 129×)。
 
@@ -501,16 +808,17 @@ Batch 模式更适合精确测量能耗-position 关系；Stream 模式更接近
 - 更有效的优化方向是减少**计算量** (attention FLOPs) 和**执行时间** (静态功耗)
 - 新一代 GPU (如 H100/H200) 的更高 HBM 带宽可以缩短每个 step 的执行时间，从而减少静态功耗占比
 
-### 6.6 实验方法论的贡献
+### 6.8 实验方法论的贡献
 
-本实验验证了两种互补的 token-level 能耗测量方法：
+本实验验证了三种互补的 token-level 能耗测量方法：
 
 | 方法 | 适用场景 | 优势 | 局限 |
 |------|---------|------|------|
 | **Batch 模式** | 精确的能耗-position 关系 | R² 高，position 对齐 | 不反映真实服务场景 |
 | **Stream 模式** | 真实服务场景模拟 | 贴近实际，含并发度效应 | R² 较低，需长时间运行 |
+| **Batch Size Sweep** | batch size 对能耗的影响 | 控制变量，结果可比 | 需要多轮实验 |
 
-**推荐**: 先用 Batch 模式获取精确的 $k$ 和 $E_0$，再用 Stream 模式验证在真实场景下的适用性。
+**推荐**: 先用 Batch 模式获取精确的 $k$ 和 $E_0$，再用 Stream 模式验证在真实场景下的适用性，最后用 Batch Size Sweep 找到最优的 batch size 配置。
 
 ---
 
@@ -527,14 +835,29 @@ output/
 │   ├── token_energy_stream_rounds.csv         (1 round)
 │   └── figures/                               (4 plots)
 │
-└── token_energy_batch_Qwen3-32B_auto_n30_t15000_r3_20260312_014204/
+├── token_energy_batch_Qwen3-32B_auto_n30_t15000_r3_20260312_014204/
+│   ├── config.txt
+│   ├── token_energy_batch_per_position.csv     (15,001 positions)
+│   ├── token_energy_batch_per_sample.csv       (90 samples)
+│   ├── token_energy_batch_step_raw.csv         (44,999 steps)
+│   ├── token_energy_batch_rounds.csv           (3 rounds)
+│   ├── token_energy_batch_prefill.csv          (3 rounds + avg)
+│   └── figures/                                (4 plots)
+│
+└── token_energy_stream_Qwen3-8B_auto_n20_t12000_rate30_dur1800_mns40-60-100_20260312_034702/
     ├── config.txt
-    ├── token_energy_batch_per_position.csv     (15,001 positions)
-    ├── token_energy_batch_per_sample.csv       (90 samples)
-    ├── token_energy_batch_step_raw.csv         (44,999 steps)
-    ├── token_energy_batch_rounds.csv           (3 rounds)
-    ├── token_energy_batch_prefill.csv          (3 rounds + avg)
-    └── figures/                                (4 plots)
+    ├── batch_size_sweep_summary.csv            (3 轮汇总)
+    ├── mns_40/                                 (max_num_seqs=40)
+    │   ├── _summary.json
+    │   ├── token_energy_stream_per_position.csv (11,999 positions)
+    │   ├── token_energy_stream_per_sample.csv   (920 requests)
+    │   ├── token_energy_stream_steps.csv        (22,548 steps)
+    │   ├── token_energy_stream_rounds.csv       (1 round)
+    │   └── figures/                             (4 plots)
+    ├── mns_60/                                 (max_num_seqs=60)
+    │   └── ... (同上结构)
+    └── mns_100/                                (max_num_seqs=100)
+        └── ... (同上结构)
 ```
 
 ### B. 复现命令
@@ -555,4 +878,13 @@ python scripts/uav_client.py \
     --mode token_energy_batch \
     --token_samples 30 --token_max_tokens 15000 \
     --batch_repeats 3 --seed 321
+
+# 实验 C: Batch Size Sweep (Qwen3-8B)
+python scripts/uav_client.py \
+    --draft_model_name ~/model_hub/Qwen3-8B \
+    --device auto \
+    --mode token_energy_stream \
+    --req_rate 30 --duration 1800 --warmup 30 \
+    --token_max_tokens 12000 --token_samples 20 --seed 321 \
+    --stream_batch_sizes "40,60,100"
 ```

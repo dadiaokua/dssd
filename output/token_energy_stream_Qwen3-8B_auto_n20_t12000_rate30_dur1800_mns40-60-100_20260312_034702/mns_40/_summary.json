@@ -1,0 +1,14 @@
+{
+  "req_rate": 30.0,
+  "duration": 1800,
+  "pool_size": 20,
+  "num_repeats": 1,
+  "warmup": 30,
+  "total_injected": 920,
+  "max_position": 11999,
+  "total_generated_tokens": 893241,
+  "wall_time_s": 1800.436841726303,
+  "throughput_tok_s": 496.12459559733213,
+  "decode_mean_mj_per_token": 1681.1691465184374,
+  "decode_std_mj_per_token": 0.0
+}

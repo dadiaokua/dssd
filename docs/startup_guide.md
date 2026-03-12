@@ -132,6 +132,20 @@ output/
 │       ├── token_energy_batch_comparison.png
 │       ├── token_energy_cumulative.png
 │       └── token_energy_distribution.png
+├── token_energy_stream_Qwen3-8B_auto_n20_t4096_rate20_dur600_mns8-16-32-64_20260312_100000/
+│   ├── config.txt                          # 顶层实验配置
+│   ├── batch_size_sweep_summary.csv        # 所有 batch size 的汇总对比
+│   ├── mns_8/                              # max_num_seqs=8 的独立结果
+│   │   ├── token_energy_stream_per_position.csv
+│   │   ├── token_energy_stream_per_sample.csv
+│   │   ├── token_energy_stream_rounds.csv
+│   │   └── figures/
+│   ├── mns_16/                             # max_num_seqs=16 的独立结果
+│   │   └── ...
+│   ├── mns_32/                             # max_num_seqs=32 的独立结果
+│   │   └── ...
+│   └── mns_64/                             # max_num_seqs=64 的独立结果
+│       └── ...
 └── kv_benchmark_Qwen3-32B_vllm_kv32-64-128_g64_20260311_160000/
     ├── config.txt
     ├── results_kvcache_raw.csv
@@ -145,6 +159,7 @@ output/
 - `rate20`: `--req_rate 20` (stream 模式: 20 req/min)
 - `dur12000`: `--duration 12000` (stream 模式: 实验时长 12000s)
 - `w50`: `--warmup 50` (stream 模式: 50 个预热请求)
+- `mns8-16-32-64`: `--stream_batch_sizes "8,16,32,64"` (stream 模式: 多轮 max_num_seqs sweep)
 - `kv32-64-128`: `--kv_lengths 32,64,128`
 - `g64`: `--gen_tokens 64`
 
@@ -265,6 +280,7 @@ python scripts/uav_client.py [选项]
 | `--req_rate` | float | `10.0` | ⚡ stream 专用: 请求注入速率 (requests/min)，如 20 = 每 3 秒注入一个请求 |
 | `--duration` | int | `600` | ⚡ stream 专用: 每轮实验时长 (秒)，到时间后**立即结束**实验 |
 | `--warmup` | int | `0` | ⚡ stream 专用: 预热请求数。计时前先注入并完成 prefill，确保 GPU 在稳定并发状态 |
+| `--stream_batch_sizes` | str | `None` | ⚡ stream 专用: 逗号分隔的 vLLM `max_num_seqs` 值列表，如 `"8,16,32,64,128"`。每个值会**重建 vLLM 引擎**并跑一轮独立实验，结果分别保存 |
 
 #### 网络限速参数
 
@@ -692,6 +708,20 @@ python scripts/uav_client.py \
     --req_rate 2 \
     --duration 300 \
     --token_max_tokens 4096
+
+# Batch-size sweep: 对比不同 max_num_seqs 下的能耗规律
+# 每个 batch size 会重建 vLLM 引擎, 跑一轮独立的 stream 实验
+# 结果分别保存到各自的子目录 (mns_8/, mns_16/, mns_32/, ...)
+python scripts/uav_client.py \
+    --draft_model_name ~/model_hub/Qwen3-8B \
+    --device auto \
+    --mode token_energy_stream \
+    --req_rate 20 \
+    --duration 600 \
+    --token_max_tokens 4096 \
+    --token_samples 20 \
+    --warmup 10 \
+    --stream_batch_sizes "8,16,32,64,128"
 ```
 
 **关键参数**：
@@ -701,6 +731,7 @@ python scripts/uav_client.py \
 | `--req_rate` | float | `10.0` | 请求注入速率 (requests/min)，如 10 = 每 6 秒注入一个请求 |
 | `--duration` | int | `600` | 每轮实验时长 (秒)，到时间后**立即结束**实验 |
 | `--warmup` | int | `0` | 预热请求数。在计时开始前先注入这些请求并完成 prefill，确保实验开始时 GPU 已在稳定并发状态。设为 0 表示不预热 |
+| `--stream_batch_sizes` | str | `None` | 逗号分隔的 vLLM `max_num_seqs` 值列表。每个值会**重建 vLLM 引擎**并跑一轮独立 stream 实验，结果分别保存到子目录。如 `"8,16,32,64,128"`。不设置则使用默认引擎跑单轮 |
 | `--token_samples` | int | `20` | prompt pool 大小 (从 dataset 中加载)，请求循环使用 |
 | `--token_max_tokens` | int | `128` | 每个请求最大生成 token 数 |
 | `--batch_repeats` | int | `1` | 重复轮次数 (每轮使用不同 seed) |
@@ -710,6 +741,7 @@ python scripts/uav_client.py \
 > - `--warmup` 的请求在计时前完成 prefill，它们的 decode 能耗会被正常记录
 > - **Prefill 能耗不计入**：每个请求的第一个 token (position 0) 是 prefill 输出，其能耗被跳过
 > - `--token_samples` 控制的是 prompt pool 的大小，请求会循环使用 pool 中的 prompt
+> - 使用 `--stream_batch_sizes` 时，每个 `max_num_seqs` 值会**重新创建 vLLM 引擎**（因为 `max_num_seqs` 是引擎初始化参数），每轮实验完全独立，结果保存到各自的子目录中
 
 **输出文件**（均在实验目录下，如 `output/token_energy_stream_Qwen3-32B_vllm_n50_t512_rate10_dur600_w20_20260311_150000/`）：
 
@@ -718,8 +750,16 @@ python scripts/uav_client.py \
 | `config.txt` | 完整实验参数记录 |
 | `token_energy_stream_per_position.csv` | 每个 position 的平均单 token **decode** 能耗 (多轮聚合, 含 mean/std/min/max/count) |
 | `token_energy_stream_per_sample.csv` | 每轮每个请求的汇总 (来源/prompt 长度/生成 token 数/注入时刻/是否 warmup) |
+| `token_energy_stream_steps.csv` | 每个 step 的原始记录 (step 能耗 / decode_active / prefill 数) |
 | `token_energy_stream_rounds.csv` | 每轮的汇总统计 (seed/注入数/生成量/耗时/实际速率/平均能耗) |
 | `figures/` | 自动生成的可视化图表 |
+
+**使用 `--stream_batch_sizes` 时的额外输出**：
+
+| 文件 | 内容 |
+|------|------|
+| `mns_8/`, `mns_16/`, ... | 每个 `max_num_seqs` 值的独立实验子目录，各含完整的 CSV 和 `figures/` |
+| `batch_size_sweep_summary.csv` | 所有 batch size 的汇总对比 (decode_mean, throughput, injected, generated 等) |
 
 **可视化图表**（自动生成到 `figures/` 子目录）：
 
@@ -1202,6 +1242,74 @@ python scripts/uav_client.py \
 ```
 
 > 对比不同 `req_rate` 下的能耗曲线斜率，可以分析并发度对 KV cache 能耗效应的影响。
+
+### 实验 9: 流式 Token 能耗 — Batch Size Sweep (不同 max_num_seqs 对比)
+
+> 通过控制 vLLM 引擎的 `max_num_seqs` 参数，限制引擎同时处理的最大请求数，
+> 从而精确控制 batch size。每个 batch size 会重建引擎并跑一轮独立实验，
+> 对比不同并发度下的 per-token decode 能耗和吞吐量。
+
+```bash
+# 基本 sweep: 对比 8/16/32/64/128 五种 batch size
+python scripts/uav_client.py \
+    --draft_model_name ~/model_hub/Qwen3-8B \
+    --device auto \
+    --mode token_energy_stream \
+    --req_rate 20 \
+    --duration 600 \
+    --token_max_tokens 4096 \
+    --token_samples 20 \
+    --warmup 10 \
+    --stream_batch_sizes "8,16,32,64,128"
+
+# 细粒度 sweep: 更多 batch size 点, 更长实验时间
+python scripts/uav_client.py \
+    --draft_model_name ~/model_hub/Qwen3-8B \
+    --device auto \
+    --mode token_energy_stream \
+    --req_rate 20 \
+    --duration 1200 \
+    --token_max_tokens 8192 \
+    --token_samples 30 \
+    --warmup 20 \
+    --stream_batch_sizes "4,8,16,24,32,48,64,96,128"
+
+# 大模型 sweep
+python scripts/uav_client.py \
+    --draft_model_name ~/model_hub/Qwen3-32B \
+    --device auto \
+    --gpu_ids 0,1,2,3,4,5,6,7 \
+    --mode token_energy_stream \
+    --req_rate 15 \
+    --duration 900 \
+    --token_max_tokens 4096 \
+    --token_samples 20 \
+    --warmup 10 \
+    --stream_batch_sizes "4,8,16,32"
+```
+
+**工作原理**：
+
+1. 解析 `--stream_batch_sizes` 为 batch size 列表，如 `[8, 16, 32, 64, 128]`
+2. **跳过主进程的引擎创建**（避免浪费初始化时间）
+3. 对每个 batch size `mns`，启动**独立的 Python 子进程**：
+   - 子进程中 CUDA 未初始化，vLLM 可以正常使用 `fork` 模式创建 worker
+   - **创建**新的 vLLM 引擎，设置 `max_num_seqs=mns`
+   - 创建独立的实验子目录 `mns_{mns}/`
+   - 运行完整的 stream 实验 (warmup → 速率注入 → 到时间结束)
+   - 生成可视化图表到子目录的 `figures/`
+   - 将 summary 写入 `_summary.json`，子进程退出
+4. 主进程读取每轮的 `_summary.json`，汇总对比
+5. 所有轮次完成后，输出汇总对比表并保存 `batch_size_sweep_summary.csv`
+
+> **为什么使用子进程？** vLLM 多卡引擎使用 `fork` 模式创建 worker 进程。如果在同一进程中先销毁旧引擎再创建新引擎，CUDA 上下文已被初始化，vLLM 被迫切换到 `spawn` 模式，在 V100 等老 GPU 上容易导致 NCCL 初始化死锁。使用独立子进程可以确保每轮实验都在干净的 CUDA 环境中启动。
+
+**预期分析**：
+
+- **小 batch size (如 8)**：per-token 能耗较高（GPU 利用率低，idle 功耗占比大）
+- **中等 batch size (如 32~64)**：per-token 能耗最低（GPU 利用率高，batch 摊薄效果最佳）
+- **大 batch size (如 128+)**：per-token 能耗可能回升（HBM 带宽瓶颈，KV cache 竞争加剧）
+- **吞吐量**：随 batch size 增大而增加，但增速递减（受 HBM 带宽限制）
 
 ---
 

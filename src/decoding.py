@@ -1261,6 +1261,11 @@ def run_token_energy_stream_benchmark(
       - batch: 所有请求同时开始, position 完全对齐
       - stream: 请求按时间速率陆续到达, 更贴近真实服务场景
 
+    不同 batch size 的对比通过 --stream_batch_sizes 参数实现:
+      在 uav_client.py 中循环多轮, 每轮用不同的 max_num_seqs 重新创建
+      vLLM 引擎, 从而控制 vLLM 调度器的 batch size 上限。
+      本函数只负责单轮实验逻辑。
+
     参数:
       uav_node:    VLLMDraftNode (必须是 vLLM 引擎)
       tokenizer:   分词器
@@ -1389,7 +1394,7 @@ def run_token_energy_stream_benchmark(
         for pos, vals in round_pos_energies.items():
             all_round_pos_energies[pos].extend(vals)
 
-        all_round_results.append((results, prompts, stream_info))
+        all_round_results.append((results, prompts, step_records, stream_info))
 
         round_summary = {
             "round_idx": r_idx,
@@ -1445,7 +1450,7 @@ def run_token_energy_stream_benchmark(
         writer.writerow(["round", "request_idx", "pool_idx", "source",
                           "prompt_len", "generated_tokens", "inject_time_s",
                           "is_warmup", "request_id"])
-        for r_idx, (results, prompts, _) in enumerate(all_round_results):
+        for r_idx, (results, prompts, _, _) in enumerate(all_round_results):
             for result in results:
                 pool_idx = result.get("pool_idx", result["idx"] % len(prompts))
                 source = prompts[pool_idx].get("source", "unknown") \
@@ -1458,6 +1463,26 @@ def run_token_energy_stream_benchmark(
                     result["request_id"],
                 ])
     print(f"✅ Per-sample summary saved to {sample_csv}")
+
+    # ---- 保存 step-level 记录 ----
+    steps_csv = os.path.join(csv_dir, "token_energy_stream_steps.csv")
+    with open(steps_csv, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            "round", "step", "time_s", "step_energy_mj", "num_active",
+            "num_prefill",
+        ])
+        for r_idx, (_, _, step_records, _) in enumerate(all_round_results):
+            for row in step_records:
+                writer.writerow([
+                    r_idx,
+                    row.get("step", 0),
+                    round(row.get("time", 0.0), 4),
+                    round(row.get("step_energy_mj", 0.0), 4),
+                    row.get("num_active", 0),
+                    row.get("num_prefill", 0),
+                ])
+    print(f"✅ Step-level records saved to {steps_csv}")
 
     # ---- 保存每轮汇总 ----
     rounds_csv = os.path.join(csv_dir, "token_energy_stream_rounds.csv")

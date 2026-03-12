@@ -573,6 +573,10 @@ class VLLMDraftNode:
           - 达到 duration 后立即结束实验
           - 只记录 decode 阶段的能耗 (跳过 prefill)
 
+        不同 batch size 的对比通过 --stream_batch_sizes 参数实现:
+          在 uav_client.py 中循环多轮, 每轮用不同的 max_num_seqs 重新创建
+          vLLM 引擎, 从而控制 vLLM 调度器的 batch size 上限。
+
         每个 step:
           1. 检查是否该注入新请求 (基于 wall-clock 时间)
           2. 测量整个 step 的 GPU 能耗
@@ -709,6 +713,35 @@ class VLLMDraftNode:
         # 用于追踪正式实验期间新注入的请求数
         experiment_inject_count = 0
 
+        def _inject_one_request(elapsed_s: float, is_warmup: bool = False):
+            nonlocal inject_count, experiment_inject_count
+            pool_idx = inject_count % n_pool
+            token_ids = prompts_token_ids[pool_idx]
+            req_id = f"stream_{id(self)}_{inject_count}_{time.monotonic_ns()}"
+            engine.add_request(
+                request_id=req_id,
+                prompt={"prompt_token_ids": token_ids},
+                params=sampling_params,
+            )
+            request_ids.append(req_id)
+            req_state[req_id] = {
+                "idx": inject_count,
+                "pool_idx": pool_idx,
+                "prompt_len": len(token_ids),
+                "generated_count": 0,
+                "prev_count": 0,
+                "finished": False,
+                "generated_ids": [],
+                "in_prefill": True,
+                "inject_time": 0.0 if is_warmup else elapsed_s,
+                "is_warmup": is_warmup,
+            }
+            per_request_energies[req_id] = []
+            inject_count += 1
+            if not is_warmup:
+                experiment_inject_count += 1
+            return pool_idx, len(token_ids)
+
         while True:
             t_now = time.time()
             elapsed = t_now - t_start
@@ -730,39 +763,13 @@ class VLLMDraftNode:
                             pass
                 break
 
-            # ---- 注入新请求 (基于 wall-clock 时间) ----
+            # ---- 注入新请求 (基于速率) ----
             if t_now >= t_next_inject:
-                # 从 prompt pool 中循环取 prompt
-                pool_idx = inject_count % n_pool
-                token_ids = prompts_token_ids[pool_idx]
-                req_id = f"stream_{id(self)}_{inject_count}_{time.monotonic_ns()}"
-                engine.add_request(
-                    request_id=req_id,
-                    prompt={"prompt_token_ids": token_ids},
-                    params=sampling_params,
-                )
-                request_ids.append(req_id)
-                req_state[req_id] = {
-                    "idx": inject_count,
-                    "pool_idx": pool_idx,
-                    "prompt_len": len(token_ids),
-                    "generated_count": 0,
-                    "prev_count": 0,
-                    "finished": False,
-                    "generated_ids": [],
-                    "in_prefill": True,
-                    "inject_time": elapsed,
-                    "is_warmup": False,
-                }
-                per_request_energies[req_id] = []
-                inject_count += 1
-                experiment_inject_count += 1
-
+                pool_idx, prompt_len = _inject_one_request(elapsed, is_warmup=False)
                 if experiment_inject_count <= 5 or experiment_inject_count % 50 == 0:
                     print(f"    [StreamStep] 注入请求 #{experiment_inject_count} "
-                          f"(pool={pool_idx}, prompt_len={len(token_ids)}, "
+                          f"(pool={pool_idx}, prompt_len={prompt_len}, "
                           f"t={elapsed:.1f}s)")
-
                 t_next_inject = t_start + experiment_inject_count * inject_interval_sec
 
             # ---- 检查是否还有未完成的请求 ----
@@ -1188,7 +1195,8 @@ def _should_use_vllm(engine: str, device_str: str, model_name: str = "") -> bool
 
 
 def create_draft_node(model_name: str, device_str: str, framework: str, args,
-                      gpu_ids: str = None, engine: str = "auto"):
+                      gpu_ids: str = None, engine: str = "auto",
+                      max_num_seqs: int | None = None):
     """
     工厂函数: 根据框架和引擎选择创建对应的 DraftNode
     返回: (draft_node, tokenizer)
@@ -1201,6 +1209,10 @@ def create_draft_node(model_name: str, device_str: str, framework: str, args,
     多卡支持:
       - device="auto"              → 自动分配到所有可用 GPU
       - device="auto" + gpu_ids="0,1,2"  → 分配到指定 GPU
+
+    max_num_seqs:
+      vLLM 调度器每个 batch 最多处理的请求数。
+      None 则使用 vLLM 默认值 (256)。
     """
     fw = detect_framework(device_str, framework)
     print(f"[UAV] Selected framework: {fw.upper()}")
@@ -1216,7 +1228,8 @@ def create_draft_node(model_name: str, device_str: str, framework: str, args,
     use_vllm = _should_use_vllm(engine, device_str, model_name)
 
     if use_vllm:
-        return _create_vllm_node(model_name, args, gpu_ids)
+        return _create_vllm_node(model_name, args, gpu_ids,
+                                 max_num_seqs=max_num_seqs)
 
     # ---- PyTorch 后端 ----
     return _create_pytorch_node(model_name, device_str, args, gpu_ids)
@@ -1243,12 +1256,20 @@ def _get_gpu_count_no_init() -> int:
     return 1
 
 
-def _create_vllm_node(model_name: str, args, gpu_ids: str = None):
+def _create_vllm_node(model_name: str, args, gpu_ids: str = None,
+                      max_num_seqs: int | None = None):
     """
     创建 vLLM 引擎节点。
 
     **重要**: 在调用 vllm.LLM() 之前, 不能有任何 torch.cuda API 调用,
     否则 vLLM 多卡 fork 会报 "Cannot re-initialize CUDA in forked subprocess"。
+
+    Args:
+        model_name: 模型路径或名称
+        args:       CLI 参数
+        gpu_ids:    逗号分隔的 GPU ID (可选)
+        max_num_seqs: vLLM 调度器每个 batch 最多处理的请求数 (可选,
+                      None 则使用 vLLM 默认值 256)
     """
     from vllm import LLM
 
@@ -1278,6 +1299,11 @@ def _create_vllm_node(model_name: str, args, gpu_ids: str = None):
               f"使用 dtype=half, enforce_eager=True, compilation_level=0 (NO_COMPILATION)")
     else:
         vllm_dtype = "auto"
+
+    # 设置 max_num_seqs (控制 vLLM 调度器的 batch size 上限)
+    if max_num_seqs is not None:
+        vllm_extra_kwargs["max_num_seqs"] = max_num_seqs
+        print(f"[UAV Client] max_num_seqs = {max_num_seqs}")
 
     print(f"[UAV Client] Loading draft model with vLLM engine: {model_name}")
     print(f"[UAV Client] tensor_parallel_size = {tp_size}, dtype = {vllm_dtype}")

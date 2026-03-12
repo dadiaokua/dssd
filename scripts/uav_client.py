@@ -172,10 +172,15 @@ def _make_experiment_dir(args):
         if mode == "token_energy_stream":
             param_parts.append(f"rate{args.req_rate:.0f}")
             param_parts.append(f"dur{args.duration}")
-            if args.warmup > 0:
-                param_parts.append(f"w{args.warmup}")
-            if args.batch_repeats > 1:
-                param_parts.append(f"r{args.batch_repeats}")
+            if getattr(args, "stream_batch_sizes", None):
+                # batch-size sweep 模式: 用 max_num_seqs 控制 vLLM batch size
+                bs_str = args.stream_batch_sizes.replace(",", "-")
+                param_parts.append(f"mns{bs_str}")
+            else:
+                if args.warmup > 0:
+                    param_parts.append(f"w{args.warmup}")
+                if args.batch_repeats > 1:
+                    param_parts.append(f"r{args.batch_repeats}")
     elif mode == "kv_benchmark":
         kv_str = args.kv_lengths.replace(",", "-")
         param_parts.append(f"kv{kv_str}")
@@ -333,6 +338,13 @@ def main():
                              "pre-inject before the timed experiment starts. These requests "
                              "complete prefill first, ensuring GPU is at steady-state "
                              "concurrency from the start. (default: 0 = no warmup)")
+    parser.add_argument('--stream_batch_sizes', type=str, default=None,
+                        help="For token_energy_stream mode: comma-separated list of vLLM "
+                             "max_num_seqs values to sweep. Each value controls the maximum "
+                             "number of requests vLLM can process simultaneously in one batch. "
+                             "For each value, a NEW vLLM engine is created and a full stream "
+                             "experiment is run. Results are saved independently per batch size. "
+                             "E.g. '8,16,32,64,128'. (default: None = use single engine)")
     # ---------- 网络限速 (Traffic Shaping) ----------
     parser.add_argument('--tc_enable', action='store_true',
                         help="Enable OS-level traffic shaping (requires sudo)")
@@ -361,18 +373,27 @@ def main():
     if args.interactive or args.mode in ("benchmark", "kv_benchmark"):
         args = _interactive_method_selection(args)
 
-    # 根据设备自动选择框架和引擎，加载小模型
-    uav_node, tokenizer = create_draft_node(
-        model_name=args.draft_model_name,
-        device_str=args.device,
-        framework=args.framework,
-        args=args,
-        gpu_ids=getattr(args, 'gpu_ids', None),
-        engine=getattr(args, 'engine', 'auto'),
-    )
-
     # ==================== 创建实验输出目录 ====================
     experiment_dir = _make_experiment_dir(args)
+
+    # Sweep 模式下跳过初始引擎创建 (每轮用子进程独立创建)
+    _skip_initial_engine = (
+        args.mode == "token_energy_stream"
+        and getattr(args, 'stream_batch_sizes', None)
+    )
+
+    uav_node = None
+    tokenizer = None
+    if not _skip_initial_engine:
+        # 根据设备自动选择框架和引擎，加载小模型
+        uav_node, tokenizer = create_draft_node(
+            model_name=args.draft_model_name,
+            device_str=args.device,
+            framework=args.framework,
+            args=args,
+            gpu_ids=getattr(args, 'gpu_ids', None),
+            engine=getattr(args, 'engine', 'auto'),
+        )
 
     results = []
 
@@ -471,29 +492,175 @@ def main():
 
         # ==================== Stream Token Energy Benchmark 模式 ====================
         elif args.mode == "token_energy_stream":
-            summary = run_token_energy_stream_benchmark(
-                uav_node=uav_node,
-                tokenizer=tokenizer,
-                args=args,
-                pool_size=args.token_samples,
-                max_tokens=args.token_max_tokens,
-                seed=args.seed,
-                num_repeats=args.batch_repeats,
-                req_rate=args.req_rate,
-                duration=args.duration,
-                warmup=args.warmup,
-            )
-            n_rounds = summary.get('num_repeats', 1)
-            std_str = ""
-            if n_rounds > 1:
-                std_str = f" ± {summary.get('decode_std_mj_per_token', 0):.2f}"
-            print(f"\n[Token Energy Stream] 完成! "
-                  f"rate={summary['req_rate']:.1f} req/min, "
-                  f"duration={summary['duration']}s, "
-                  f"共注入 {summary['total_injected']} 个请求 × {n_rounds} 轮, "
-                  f"平均 {summary['decode_mean_mj_per_token']:.2f}{std_str} mJ/token")
-            # 自动可视化
-            _auto_visualize(args, mode="stream")
+            stream_batch_sizes_str = getattr(args, 'stream_batch_sizes', None)
+
+            if stream_batch_sizes_str:
+                # ---- Batch-size sweep 模式: 每轮用独立子进程, 避免 vLLM spawn 死锁 ----
+                #
+                # 问题: vLLM 多卡引擎使用 fork 创建 worker 进程。
+                # 如果在同一进程中先 del 旧引擎再 new 新引擎,
+                # CUDA 上下文已初始化, vLLM 被迫切换到 spawn 模式,
+                # 在 V100 等老 GPU 上容易死锁 (NCCL init hang)。
+                #
+                # 解决: 每轮实验启动一个全新的 Python 子进程,
+                # 子进程中 CUDA 未初始化, vLLM 可以正常 fork。
+                # 通过 JSON 文件传回 summary 结果。
+                import json
+                import subprocess
+                import csv as _csv
+
+                batch_sizes = [int(x.strip()) for x in stream_batch_sizes_str.split(",")]
+                print(f"\n{'#'*60}")
+                print(f"# STREAM BATCH-SIZE SWEEP (subprocess per round)")
+                print(f"# max_num_seqs values: {batch_sizes}")
+                print(f"# Each round: rate={args.req_rate}, duration={args.duration}s, "
+                      f"warmup={args.warmup}")
+                print(f"{'#'*60}\n")
+
+                sweep_summaries = []
+                base_experiment_dir = args.experiment_dir
+
+                for bs_idx, mns in enumerate(batch_sizes):
+                    print(f"\n{'='*60}")
+                    print(f"  BATCH SIZE ROUND {bs_idx + 1}/{len(batch_sizes)}: "
+                          f"max_num_seqs = {mns}")
+                    print(f"{'='*60}")
+
+                    # 为本轮创建子目录
+                    round_dir = os.path.join(base_experiment_dir, f"mns_{mns}")
+                    os.makedirs(round_dir, exist_ok=True)
+
+                    # summary JSON 输出路径
+                    summary_json = os.path.join(round_dir, "_summary.json")
+
+                    # 构建子进程命令: 运行同一个脚本的 _sweep_round_worker
+                    worker_cmd = [
+                        sys.executable, os.path.abspath(__file__),
+                        "--_sweep_worker",
+                        "--draft_model_name", args.draft_model_name,
+                        "--device", args.device,
+                        "--framework", args.framework,
+                        "--engine", getattr(args, 'engine', 'auto'),
+                        "--token_samples", str(args.token_samples),
+                        "--token_max_tokens", str(args.token_max_tokens),
+                        "--seed", str(args.seed),
+                        "--batch_repeats", str(args.batch_repeats),
+                        "--req_rate", str(args.req_rate),
+                        "--duration", str(args.duration),
+                        "--warmup", str(args.warmup),
+                        "--temperature", str(args.temperature),
+                        "--top_k", str(args.top_k),
+                        "--top_p", str(args.top_p),
+                        "--_mns", str(mns),
+                        "--_round_dir", round_dir,
+                        "--_summary_json", summary_json,
+                    ]
+                    if getattr(args, 'gpu_ids', None):
+                        worker_cmd.extend(["--gpu_ids", args.gpu_ids])
+
+                    print(f"  🚀 启动子进程: max_num_seqs={mns}")
+                    proc = subprocess.run(
+                        worker_cmd,
+                        cwd=_PROJECT_ROOT,
+                    )
+
+                    if proc.returncode != 0:
+                        print(f"  ❌ 子进程异常退出 (exit code {proc.returncode})")
+                        continue
+
+                    # 读取子进程输出的 summary
+                    if os.path.isfile(summary_json):
+                        with open(summary_json, "r") as f:
+                            summary = json.load(f)
+                        # 确保数值类型正确 (JSON 可能把 int 读为 float)
+                        for int_key in ("total_injected", "total_generated_tokens",
+                                        "max_position"):
+                            if int_key in summary:
+                                summary[int_key] = int(summary[int_key])
+                        for float_key in ("decode_mean_mj_per_token",
+                                          "decode_std_mj_per_token",
+                                          "throughput_tok_s", "wall_time_s"):
+                            if float_key in summary:
+                                summary[float_key] = float(summary[float_key])
+                        summary["max_num_seqs"] = mns
+                        sweep_summaries.append(summary)
+                        print(f"  ✅ max_num_seqs={mns}: "
+                              f"decode_mean={summary['decode_mean_mj_per_token']:.2f} mJ/token, "
+                              f"injected={summary['total_injected']}, "
+                              f"throughput={summary['throughput_tok_s']:.1f} tok/s")
+                    else:
+                        print(f"  ⚠ 未找到 summary 文件: {summary_json}")
+
+                # ---- 输出汇总对比表 ----
+                if sweep_summaries:
+                    print(f"\n{'#'*60}")
+                    print(f"# BATCH-SIZE SWEEP SUMMARY")
+                    print(f"{'#'*60}")
+                    header = (f"{'max_num_seqs':>14s} {'decode_mean(mJ)':>16s} "
+                              f"{'injected':>10s} {'generated':>12s} "
+                              f"{'throughput':>12s}")
+                    print(header)
+                    print("-" * len(header))
+                    for s in sweep_summaries:
+                        print(f"{s['max_num_seqs']:>14d} "
+                              f"{s['decode_mean_mj_per_token']:>16.2f} "
+                              f"{s['total_injected']:>10d} "
+                              f"{s['total_generated_tokens']:>12d} "
+                              f"{s['throughput_tok_s']:>12.1f}")
+
+                    # 保存汇总 CSV
+                    sweep_csv = os.path.join(base_experiment_dir,
+                                             "batch_size_sweep_summary.csv")
+                    with open(sweep_csv, "w", newline="") as f:
+                        writer = _csv.writer(f)
+                        writer.writerow([
+                            "max_num_seqs", "decode_mean_mj_per_token",
+                            "decode_std_mj_per_token",
+                            "total_injected", "total_generated_tokens",
+                            "throughput_tok_s", "wall_time_s",
+                            "max_position", "warmup",
+                        ])
+                        for s in sweep_summaries:
+                            writer.writerow([
+                                s["max_num_seqs"],
+                                round(s["decode_mean_mj_per_token"], 4),
+                                round(s.get("decode_std_mj_per_token", 0), 4),
+                                s["total_injected"],
+                                s["total_generated_tokens"],
+                                round(s["throughput_tok_s"], 2),
+                                round(s["wall_time_s"], 2),
+                                s["max_position"],
+                                s.get("warmup", 0),
+                            ])
+                    print(f"\n✅ Sweep summary saved to {sweep_csv}")
+                else:
+                    print("\n⚠ 没有成功完成的轮次")
+
+            else:
+                # ---- 普通 stream 模式 (单引擎) ----
+                summary = run_token_energy_stream_benchmark(
+                    uav_node=uav_node,
+                    tokenizer=tokenizer,
+                    args=args,
+                    pool_size=args.token_samples,
+                    max_tokens=args.token_max_tokens,
+                    seed=args.seed,
+                    num_repeats=args.batch_repeats,
+                    req_rate=args.req_rate,
+                    duration=args.duration,
+                    warmup=args.warmup,
+                )
+                n_rounds = summary.get('num_repeats', 1)
+                std_str = ""
+                if n_rounds > 1:
+                    std_str = f" ± {summary.get('decode_std_mj_per_token', 0):.2f}"
+                print(f"\n[Token Energy Stream] 完成! "
+                      f"rate={summary['req_rate']:.1f} req/min, "
+                      f"duration={summary['duration']}s, "
+                      f"共注入 {summary['total_injected']} 个请求 × {n_rounds} 轮, "
+                      f"平均 {summary['decode_mean_mj_per_token']:.2f}{std_str} mJ/token")
+                # 自动可视化
+                _auto_visualize(args, mode="stream")
 
         # ==================== Benchmark 模式 ====================
         elif args.mode == "benchmark":
@@ -573,5 +740,98 @@ def main():
         print("\n[UAV Client] Done.")
 
 
+def _sweep_round_worker():
+    """
+    子进程入口: 在全新进程中创建 vLLM 引擎并运行一轮 stream 实验。
+
+    通过 CLI 参数接收配置, 运行完成后将 summary 写入 JSON 文件。
+    这样每轮实验都在干净的 CUDA 环境中启动, 避免 vLLM spawn 死锁。
+    """
+    import argparse
+    import json
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--_sweep_worker', action='store_true')
+    parser.add_argument('--draft_model_name', type=str, required=True)
+    parser.add_argument('--device', type=str, default='auto')
+    parser.add_argument('--framework', type=str, default='auto')
+    parser.add_argument('--engine', type=str, default='auto')
+    parser.add_argument('--gpu_ids', type=str, default=None)
+    parser.add_argument('--token_samples', type=int, default=20)
+    parser.add_argument('--token_max_tokens', type=int, default=128)
+    parser.add_argument('--seed', type=int, default=321)
+    parser.add_argument('--batch_repeats', type=int, default=1)
+    parser.add_argument('--req_rate', type=float, default=10.0)
+    parser.add_argument('--duration', type=int, default=600)
+    parser.add_argument('--warmup', type=int, default=0)
+    parser.add_argument('--temperature', type=float, default=0.7)
+    parser.add_argument('--top_k', type=int, default=10)
+    parser.add_argument('--top_p', type=float, default=0.0)
+    parser.add_argument('--_mns', type=int, required=True,
+                        help='max_num_seqs for this round')
+    parser.add_argument('--_round_dir', type=str, required=True,
+                        help='output directory for this round')
+    parser.add_argument('--_summary_json', type=str, required=True,
+                        help='path to write summary JSON')
+    wargs = parser.parse_args()
+
+    # 设置 experiment_dir 和 csv_path
+    wargs.experiment_dir = wargs._round_dir
+    wargs.csv_path = os.path.join(wargs._round_dir, "results.csv")
+    wargs.mode = "token_energy_stream"
+    wargs.max_len = wargs.token_max_tokens
+
+    mns = wargs._mns
+    round_dir = wargs._round_dir
+    summary_json = wargs._summary_json
+
+    print(f"\n[Sweep Worker] max_num_seqs={mns}, output={round_dir}")
+
+    # 创建 vLLM 引擎 (全新进程, CUDA 未初始化, 可以正常 fork)
+    uav_node, tokenizer = create_draft_node(
+        model_name=wargs.draft_model_name,
+        device_str=wargs.device,
+        framework=wargs.framework,
+        args=wargs,
+        gpu_ids=wargs.gpu_ids,
+        engine=wargs.engine,
+        max_num_seqs=mns,
+    )
+
+    # 运行 stream 实验
+    summary = run_token_energy_stream_benchmark(
+        uav_node=uav_node,
+        tokenizer=tokenizer,
+        args=wargs,
+        pool_size=wargs.token_samples,
+        max_tokens=wargs.token_max_tokens,
+        seed=wargs.seed,
+        num_repeats=wargs.batch_repeats,
+        req_rate=wargs.req_rate,
+        duration=wargs.duration,
+        warmup=wargs.warmup,
+    )
+
+    # 自动可视化
+    _auto_visualize(wargs, mode="stream")
+
+    # 写 summary JSON (供主进程读取)
+    # 确保所有值都是 JSON 可序列化的
+    json_summary = {}
+    for k, v in summary.items():
+        if isinstance(v, (int, float, str, bool, type(None))):
+            json_summary[k] = v
+        else:
+            json_summary[k] = str(v)
+    with open(summary_json, "w") as f:
+        json.dump(json_summary, f, indent=2)
+
+    print(f"[Sweep Worker] Done. Summary saved to {summary_json}")
+
+
 if __name__ == "__main__":
-    main()
+    # 检查是否是 sweep worker 子进程
+    if "--_sweep_worker" in sys.argv:
+        _sweep_round_worker()
+    else:
+        main()

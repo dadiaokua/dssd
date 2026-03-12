@@ -1,0 +1,4 @@
+max_num_seqs,decode_mean_mj_per_token,decode_std_mj_per_token,total_injected,total_generated_tokens,throughput_tok_s,wall_time_s,max_position,warmup
+40,1681.1691,0.0,920,893241,496.12,1800.44,11999,30
+60,1483.5124,0.0,920,1049313,582.82,1800.39,11999,30
+100,1096.6997,0.0,920,1247337,692.81,1800.39,11999,30
