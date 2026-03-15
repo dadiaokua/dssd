@@ -1461,23 +1461,29 @@ def run_token_energy_stream_benchmark(
             ])
     print(f"✅ Per-position energy saved to {token_csv}")
 
-    # ---- 保存 per-sample summary ----
+    # ---- 保存 per-sample summary (with TTFT & Latency) ----
     sample_csv = os.path.join(csv_dir, "token_energy_stream_per_sample.csv")
     with open(sample_csv, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["round", "request_idx", "pool_idx", "source",
                           "prompt_len", "generated_tokens", "inject_time_s",
-                          "is_warmup", "request_id"])
+                          "is_warmup", "finished", "ttft_s", "latency_s",
+                          "request_id"])
         for r_idx, (results, prompts, _, _) in enumerate(all_round_results):
             for result in results:
                 pool_idx = result.get("pool_idx", result["idx"] % len(prompts))
                 source = prompts[pool_idx].get("source", "unknown") \
                     if pool_idx < len(prompts) else "unknown"
+                ttft_val = result.get("ttft_s")
+                latency_val = result.get("latency_s")
                 writer.writerow([
                     r_idx, result["idx"], pool_idx, source,
                     result["prompt_len"], result["generated_count"],
                     round(result.get("inject_time", 0), 2),
                     result.get("is_warmup", False),
+                    result.get("finished", False),
+                    round(ttft_val, 4) if ttft_val is not None else "",
+                    round(latency_val, 4) if latency_val is not None else "",
                     result["request_id"],
                 ])
     print(f"✅ Per-sample summary saved to {sample_csv}")
@@ -1526,6 +1532,47 @@ def run_token_energy_stream_benchmark(
     decode_std = np.std([rs["decode_mean_mj"] for rs in all_round_summaries], ddof=1) \
         if num_repeats > 1 else 0.0
 
+    # ---- Aggregate TTFT / Latency from all rounds ----
+    all_ttfts = []
+    all_latencies = []
+    all_finished_count = 0
+    all_total_count = 0
+    for (results, _, _, stream_info_r) in all_round_results:
+        for result in results:
+            if result.get("is_warmup", False):
+                continue
+            all_total_count += 1
+            if result.get("finished", False):
+                all_finished_count += 1
+            t = result.get("ttft_s")
+            if t is not None:
+                all_ttfts.append(t)
+            l = result.get("latency_s")
+            if l is not None:
+                all_latencies.append(l)
+
+    ttft_summary = {}
+    if all_ttfts:
+        ttft_summary = {
+            "ttft_mean_s": float(np.mean(all_ttfts)),
+            "ttft_median_s": float(np.median(all_ttfts)),
+            "ttft_p95_s": float(np.percentile(all_ttfts, 95)) if len(all_ttfts) >= 20 else float(max(all_ttfts)),
+            "ttft_p99_s": float(np.percentile(all_ttfts, 99)) if len(all_ttfts) >= 100 else float(max(all_ttfts)),
+            "ttft_min_s": float(min(all_ttfts)),
+            "ttft_max_s": float(max(all_ttfts)),
+        }
+    latency_summary = {}
+    if all_latencies:
+        latency_summary = {
+            "latency_mean_s": float(np.mean(all_latencies)),
+            "latency_median_s": float(np.median(all_latencies)),
+            "latency_p95_s": float(np.percentile(all_latencies, 95)) if len(all_latencies) >= 20 else float(max(all_latencies)),
+            "latency_p99_s": float(np.percentile(all_latencies, 99)) if len(all_latencies) >= 100 else float(max(all_latencies)),
+            "latency_min_s": float(min(all_latencies)),
+            "latency_max_s": float(max(all_latencies)),
+        }
+    completion_rate = all_finished_count / max(1, all_total_count)
+
     summary = {
         "req_rate": req_rate,
         "duration": duration,
@@ -1539,6 +1586,11 @@ def run_token_energy_stream_benchmark(
         "throughput_tok_s": avg_throughput,
         "decode_mean_mj_per_token": decode_mean,
         "decode_std_mj_per_token": decode_std,
+        "completion_rate": completion_rate,
+        "total_requests": all_total_count,
+        "completed_requests": all_finished_count,
+        **ttft_summary,
+        **latency_summary,
     }
 
     print(f"\n{'#'*60}")
@@ -1548,6 +1600,7 @@ def run_token_energy_stream_benchmark(
     print(f"# Warmup: {warmup} requests (prefill completed before timing)")
     print(f"# Energy recording: decode only (prefill skipped)")
     print(f"# Total injected (all rounds): {total_injected_all}")
+    print(f"# Completed / Total: {all_finished_count} / {all_total_count} ({completion_rate:.1%})")
     print(f"# Repeats: {num_repeats}, Seeds: {seed}~{seed + num_repeats - 1}")
     print(f"# Max position: {final_max_pos}")
     print(f"# Total tokens generated (all rounds): {total_tokens_all}")
@@ -1559,6 +1612,16 @@ def run_token_energy_stream_benchmark(
               + ", ".join(f"{m:.1f}" for m in round_means) + " mJ/token")
     print(f"# Mean energy/token (decode, {num_repeats}-round avg): "
           f"{decode_mean:.2f} ± {decode_std:.2f} mJ")
+    if ttft_summary:
+        print(f"# TTFT: mean={ttft_summary['ttft_mean_s']:.3f}s, "
+              f"median={ttft_summary['ttft_median_s']:.3f}s, "
+              f"p95={ttft_summary['ttft_p95_s']:.3f}s, "
+              f"min={ttft_summary['ttft_min_s']:.3f}s, max={ttft_summary['ttft_max_s']:.3f}s")
+    if latency_summary:
+        print(f"# Latency: mean={latency_summary['latency_mean_s']:.1f}s, "
+              f"median={latency_summary['latency_median_s']:.1f}s, "
+              f"p95={latency_summary['latency_p95_s']:.1f}s, "
+              f"min={latency_summary['latency_min_s']:.1f}s, max={latency_summary['latency_max_s']:.1f}s")
     print(f"{'#'*60}")
 
     return summary

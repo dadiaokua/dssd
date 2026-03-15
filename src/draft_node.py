@@ -648,6 +648,9 @@ class VLLMDraftNode:
                     "generated_ids": [],
                     "in_prefill": True,
                     "inject_time": 0.0,  # warmup 请求的注入时间记为 0
+                    "inject_wall_time": time.time(),
+                    "first_token_wall_time": None,
+                    "completion_wall_time": None,
                     "is_warmup": True,
                 }
                 per_request_energies[req_id] = []
@@ -734,6 +737,9 @@ class VLLMDraftNode:
                 "generated_ids": [],
                 "in_prefill": True,
                 "inject_time": 0.0 if is_warmup else elapsed_s,
+                "inject_wall_time": time.time(),
+                "first_token_wall_time": None,
+                "completion_wall_time": None,
                 "is_warmup": is_warmup,
             }
             per_request_energies[req_id] = []
@@ -790,6 +796,7 @@ class VLLMDraftNode:
                 step_energy = last_entry[1]
 
             # ---- 更新请求状态 ----
+            t_step_wall = time.time()
             for output in step_outputs:
                 rid = output.request_id
                 if rid not in req_state:
@@ -798,10 +805,13 @@ class VLLMDraftNode:
                 state["prev_count"] = state["generated_count"]
                 if hasattr(output, 'outputs') and output.outputs:
                     cur_count = len(output.outputs[0].token_ids)
+                    if cur_count > 0 and state["first_token_wall_time"] is None:
+                        state["first_token_wall_time"] = t_step_wall
                     state["generated_count"] = cur_count
                     state["generated_ids"] = list(output.outputs[0].token_ids)
                 if output.finished:
                     state["finished"] = True
+                    state["completion_wall_time"] = t_step_wall
 
             # ---- 识别本 step 中哪些请求产出了新 token ----
             # 对于不在 step_outputs 中的请求, 同步 prev_count 防止重复计入
@@ -876,6 +886,11 @@ class VLLMDraftNode:
         results = []
         for rid in request_ids:
             state = req_state[rid]
+            inject_wt = state.get("inject_wall_time")
+            first_tok_wt = state.get("first_token_wall_time")
+            comp_wt = state.get("completion_wall_time")
+            ttft_s = (first_tok_wt - inject_wt) if (inject_wt and first_tok_wt) else None
+            latency_s = (comp_wt - inject_wt) if (inject_wt and comp_wt) else None
             results.append({
                 "request_id": rid,
                 "idx": state["idx"],
@@ -886,7 +901,48 @@ class VLLMDraftNode:
                 "per_position_energies": per_request_energies[rid],
                 "inject_time": state["inject_time"],
                 "is_warmup": state.get("is_warmup", False),
+                "finished": state["finished"],
+                "ttft_s": ttft_s,
+                "latency_s": latency_s,
             })
+
+        # ---- TTFT / Latency statistics ----
+        import numpy as _np
+        ttfts = [r["ttft_s"] for r in results
+                 if r["ttft_s"] is not None and not r["is_warmup"]]
+        latencies = [r["latency_s"] for r in results
+                     if r["latency_s"] is not None and not r["is_warmup"]]
+        ttft_stats = {}
+        if ttfts:
+            ttft_stats = {
+                "ttft_mean_s": float(_np.mean(ttfts)),
+                "ttft_median_s": float(_np.median(ttfts)),
+                "ttft_p95_s": float(_np.percentile(ttfts, 95)) if len(ttfts) >= 20 else float(max(ttfts)),
+                "ttft_p99_s": float(_np.percentile(ttfts, 99)) if len(ttfts) >= 100 else float(max(ttfts)),
+                "ttft_min_s": float(min(ttfts)),
+                "ttft_max_s": float(max(ttfts)),
+                "ttft_count": len(ttfts),
+            }
+        latency_stats = {}
+        if latencies:
+            latency_stats = {
+                "latency_mean_s": float(_np.mean(latencies)),
+                "latency_median_s": float(_np.median(latencies)),
+                "latency_p95_s": float(_np.percentile(latencies, 95)) if len(latencies) >= 20 else float(max(latencies)),
+                "latency_p99_s": float(_np.percentile(latencies, 99)) if len(latencies) >= 100 else float(max(latencies)),
+                "latency_min_s": float(min(latencies)),
+                "latency_max_s": float(max(latencies)),
+                "latency_count": len(latencies),
+            }
+        if ttft_stats:
+            print(f"[StreamStep] TTFT: mean={ttft_stats['ttft_mean_s']:.3f}s, "
+                  f"median={ttft_stats['ttft_median_s']:.3f}s, "
+                  f"p95={ttft_stats['ttft_p95_s']:.3f}s, "
+                  f"min={ttft_stats['ttft_min_s']:.3f}s, max={ttft_stats['ttft_max_s']:.3f}s")
+        if latency_stats:
+            print(f"[StreamStep] Latency: mean={latency_stats['latency_mean_s']:.1f}s, "
+                  f"median={latency_stats['latency_median_s']:.1f}s, "
+                  f"p95={latency_stats['latency_p95_s']:.1f}s")
 
         stream_info = {
             "total_steps": step_count,
@@ -898,6 +954,8 @@ class VLLMDraftNode:
             "total_generated": total_generated,
             "actual_req_rate": experiment_inject_count / (min(total_time, duration) / 60)
                                if total_time > 0 else 0,
+            **ttft_stats,
+            **latency_stats,
         }
 
         return results, step_records, stream_info

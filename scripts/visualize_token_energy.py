@@ -814,6 +814,366 @@ def print_batch_summary(pos_data, step_raw_data):
 
 
 # ══════════════════════════════════════════════════════════════
+#  Figure: TTFT & Latency Distribution
+# ══════════════════════════════════════════════════════════════
+
+def plot_ttft_latency(sample_data, output_dir):
+    """
+    Generate TTFT (Time To First Token) and per-request latency distribution.
+
+    Reads the per-sample CSV which now includes ttft_s and latency_s columns.
+    Produces a 2-row figure: TTFT histogram + Latency histogram.
+    """
+    _apply_style()
+    if not sample_data:
+        return
+
+    # Filter non-warmup requests with valid TTFT/Latency
+    ttfts = []
+    latencies = []
+    gen_counts = []
+    for row in sample_data:
+        if str(row.get("is_warmup", "")).lower() in ("true", "1"):
+            continue
+        t = row.get("ttft_s", "")
+        l = row.get("latency_s", "")
+        if t and t != "":
+            try:
+                ttfts.append(float(t))
+            except (ValueError, TypeError):
+                pass
+        if l and l != "":
+            try:
+                latencies.append(float(l))
+            except (ValueError, TypeError):
+                pass
+        gc = row.get("generated_tokens", 0)
+        try:
+            gen_counts.append(int(gc))
+        except (ValueError, TypeError):
+            pass
+
+    if not ttfts and not latencies:
+        print("  ⚠ No TTFT/Latency data found, skipping ttft_latency plot.")
+        return
+
+    n_plots = sum([bool(ttfts), bool(latencies)])
+    fig, axes = plt.subplots(n_plots, 1, figsize=(7, 3.5 * n_plots))
+    if n_plots == 1:
+        axes = [axes]
+    ax_idx = 0
+
+    if ttfts:
+        ax = axes[ax_idx]
+        ax_idx += 1
+        ttft_arr = np.array(ttfts)
+        n_bins = min(50, max(15, len(ttft_arr) // 5))
+        ax.hist(ttft_arr, bins=n_bins, color="#2196F3", alpha=0.85,
+                edgecolor="white", linewidth=0.5)
+        ax.axvline(np.mean(ttft_arr), color="#FF5722", linestyle="--",
+                   linewidth=1.5, label=f"Mean = {np.mean(ttft_arr):.3f}s")
+        ax.axvline(np.median(ttft_arr), color="#4CAF50", linestyle=":",
+                   linewidth=1.5, label=f"Median = {np.median(ttft_arr):.3f}s")
+        if len(ttft_arr) >= 20:
+            p95 = np.percentile(ttft_arr, 95)
+            ax.axvline(p95, color="#9C27B0", linestyle="-.",
+                       linewidth=1.2, label=f"P95 = {p95:.3f}s")
+        ax.set_xlabel("TTFT — Time To First Token (seconds)")
+        ax.set_ylabel("Count")
+        ax.set_title("First Token Latency Distribution")
+        ax.legend(fontsize=8)
+
+        # Finished/total stats
+        finished = sum(1 for r in sample_data
+                       if str(r.get("is_warmup", "")).lower() not in ("true", "1")
+                       and str(r.get("finished", "")).lower() in ("true", "1"))
+        total = sum(1 for r in sample_data
+                    if str(r.get("is_warmup", "")).lower() not in ("true", "1"))
+        caption = (f"N={len(ttfts)} requests | Completed: {finished}/{total} "
+                   f"({finished/max(1,total)*100:.0f}%) | "
+                   f"Min={min(ttfts):.3f}s, Max={max(ttfts):.3f}s")
+        ax.text(0.5, -0.18, caption, transform=ax.transAxes,
+                fontsize=7, ha="center", style="italic", color="#555")
+
+    if latencies:
+        ax = axes[ax_idx]
+        ax_idx += 1
+        lat_arr = np.array(latencies)
+        n_bins = min(50, max(15, len(lat_arr) // 5))
+        ax.hist(lat_arr, bins=n_bins, color="#FF9800", alpha=0.85,
+                edgecolor="white", linewidth=0.5)
+        ax.axvline(np.mean(lat_arr), color="#FF5722", linestyle="--",
+                   linewidth=1.5, label=f"Mean = {np.mean(lat_arr):.1f}s")
+        ax.axvline(np.median(lat_arr), color="#4CAF50", linestyle=":",
+                   linewidth=1.5, label=f"Median = {np.median(lat_arr):.1f}s")
+        if len(lat_arr) >= 20:
+            p95 = np.percentile(lat_arr, 95)
+            ax.axvline(p95, color="#9C27B0", linestyle="-.",
+                       linewidth=1.2, label=f"P95 = {p95:.1f}s")
+        ax.set_xlabel("End-to-End Latency (seconds)")
+        ax.set_ylabel("Count")
+        ax.set_title("Request Completion Latency Distribution")
+        ax.legend(fontsize=8)
+
+        avg_gen = np.mean(gen_counts) if gen_counts else 0
+        caption = (f"N={len(latencies)} completed requests | "
+                   f"Avg generated tokens: {avg_gen:.0f} | "
+                   f"Min={min(latencies):.1f}s, Max={max(latencies):.1f}s")
+        ax.text(0.5, -0.18, caption, transform=ax.transAxes,
+                fontsize=7, ha="center", style="italic", color="#555")
+
+    fig.tight_layout(h_pad=3.0)
+    out_path = os.path.join(output_dir, "ttft_latency_distribution.png")
+    fig.savefig(out_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  saved: {out_path}")
+
+
+# ══════════════════════════════════════════════════════════════
+#  Figure: Position-Aware Token Cost Model
+# ══════════════════════════════════════════════════════════════
+
+def plot_token_cost_model(pos_data, output_dir):
+    """
+    Generate a position-aware token cost analysis figure.
+
+    Core insight: later tokens cost more energy due to growing KV cache,
+    but uniform pricing charges the same per token. This function fits a
+    linear energy model  E(p) = alpha + beta * p  and derives a
+    position-aware cost weight  w(p) = E(p) / E_mean  so that the total
+    cost of a sequence is preserved while each token pays its fair share.
+
+    Produces a 3-panel figure:
+      Panel 1: Actual energy curve + uniform pricing line + linear model
+      Panel 2: Position-aware cost weight w(p)
+      Panel 3: Cumulative cost comparison (uniform vs position-aware)
+    """
+    if not pos_data or len(pos_data) < 20:
+        return
+
+    positions = np.array([int(r["position"]) for r in pos_data])
+    means = np.array([float(r["mean_energy_mj"]) for r in pos_data])
+
+    # Skip position 0/1 which may have prefill residual
+    mask = positions >= 2
+    if mask.sum() < 20:
+        return
+    pos = positions[mask].astype(float)
+    eng = means[mask]
+
+    n = len(pos)
+    overall_mean = eng.mean()
+
+    # ---- Fit linear model: E(p) = alpha + beta * p ----
+    coeffs = np.polyfit(pos, eng, 1)
+    beta, alpha = coeffs[0], coeffs[1]
+    model_line = np.polyval(coeffs, pos)
+
+    # R²
+    ss_res = np.sum((eng - model_line) ** 2)
+    ss_tot = np.sum((eng - overall_mean) ** 2)
+    r2 = 1 - ss_res / ss_tot if ss_tot > 0 else 0
+
+    # ---- Position-aware cost weight: w(p) = E_model(p) / E_mean ----
+    # This ensures: sum(w(p)) / N = 1, so total cost is unchanged
+    weights = model_line / overall_mean
+
+    # ---- Quartile fairness analysis ----
+    q_size = n // 4
+    q_labels = ["Q1\n(early)", "Q2", "Q3", "Q4\n(late)"]
+    q_actual_frac = []
+    q_uniform_frac = []
+    q_model_frac = []
+    for i in range(4):
+        s, e = i * q_size, (i + 1) * q_size if i < 3 else n
+        q_eng = eng[s:e].sum()
+        q_mod = model_line[s:e].sum()
+        total_eng = eng.sum()
+        total_mod = model_line.sum()
+        q_actual_frac.append(q_eng / total_eng * 100)
+        q_uniform_frac.append((e - s) / n * 100)
+        q_model_frac.append(q_mod / total_mod * 100)
+
+    # ---- Smoothing for display ----
+    window = max(5, min(200, n // 80))
+
+    # ═══════════════ Create figure ═══════════════
+    fig, axes = plt.subplots(
+        3, 1, figsize=(7, 8.5), sharex=False,
+        gridspec_kw={"height_ratios": [2.5, 1.5, 2], "hspace": 0.35})
+
+    # ---- Panel 1: Energy curve + uniform + linear model ----
+    ax1 = axes[0]
+
+    # Smoothed actual energy
+    if n > window * 2:
+        smooth_eng = _smooth(eng, window)
+        smooth_pos = _smooth_positions(pos, window)
+        ax1.plot(smooth_pos, smooth_eng, color=_COLORS["blue"],
+                 linewidth=1.5, alpha=0.7, label="Measured (moving avg)")
+    else:
+        ax1.plot(pos, eng, color=_COLORS["blue"], linewidth=1.2,
+                 alpha=0.7, label="Measured energy")
+
+    # Uniform pricing line (flat)
+    ax1.axhline(overall_mean, color=_COLORS["gray"], linewidth=1.5,
+                linestyle=":", label=f"Uniform pricing = {overall_mean:.0f} mJ",
+                zorder=3)
+
+    # Linear model
+    ax1.plot(pos, model_line, color=_COLORS["red"], linewidth=2.0,
+             linestyle="--",
+             label=(f"Linear model: E(p) = {alpha:.0f} + {beta:.4f}p  "
+                    f"(R\u00b2={r2:.3f})"),
+             zorder=4)
+
+    # Shade the "overpay" and "underpay" regions
+    ax1.fill_between(pos, overall_mean, model_line,
+                     where=model_line < overall_mean,
+                     alpha=0.15, color=_COLORS["green"],
+                     edgecolor="none", label="Early tokens overpay")
+    ax1.fill_between(pos, overall_mean, model_line,
+                     where=model_line > overall_mean,
+                     alpha=0.15, color=_COLORS["red"],
+                     edgecolor="none", label="Late tokens underpay")
+
+    # Crossover point
+    if beta != 0:
+        crossover = (overall_mean - alpha) / beta
+        if pos[0] <= crossover <= pos[-1]:
+            ax1.axvline(crossover, color=_COLORS["purple"], linewidth=0.8,
+                        linestyle="-.", alpha=0.7)
+            ax1.annotate(f"Crossover @ pos {crossover:.0f}",
+                         xy=(crossover, overall_mean),
+                         xytext=(15, 20), textcoords="offset points",
+                         fontsize=_FONT_SIZE["annotation"],
+                         color=_COLORS["purple"],
+                         arrowprops=dict(arrowstyle="->",
+                                         color=_COLORS["purple"], lw=0.8))
+
+    # Auto-clip y
+    p1_y, p99_y = np.percentile(eng, 1), np.percentile(eng, 99)
+    y_range = p99_y - p1_y
+    y_lo = max(0, p1_y - 0.5 * y_range)
+    y_hi = p99_y + 0.5 * y_range
+    if y_hi < eng.max() * 0.85:
+        ax1.set_ylim(y_lo, y_hi)
+
+    ax1.set_xlabel("Token Position")
+    ax1.set_ylabel("Energy per Token (mJ)")
+    ax1.set_title("Uniform vs Position-Aware Token Pricing")
+    ax1.legend(loc="upper left", fontsize=_FONT_SIZE["legend"] - 0.5)
+
+    # ---- Panel 2: Cost weight w(p) ----
+    ax2 = axes[1]
+
+    ax2.axhline(1.0, color=_COLORS["gray"], linewidth=1.0, linestyle=":",
+                alpha=0.7, label="Uniform weight = 1.0")
+    ax2.plot(pos, weights, color=_COLORS["orange"], linewidth=1.8,
+             label="Position-aware weight w(p)")
+
+    ax2.fill_between(pos, 1.0, weights, where=weights < 1.0,
+                     alpha=0.15, color=_COLORS["green"], edgecolor="none")
+    ax2.fill_between(pos, 1.0, weights, where=weights > 1.0,
+                     alpha=0.15, color=_COLORS["red"], edgecolor="none")
+
+    ax2.set_xlabel("Token Position")
+    ax2.set_ylabel("Cost Weight w(p)")
+    ax2.set_title("Position-Aware Cost Weight: w(p) = E_model(p) / E_mean")
+    ax2.legend(loc="upper left", fontsize=_FONT_SIZE["legend"])
+
+    # Annotate endpoints
+    ax2.annotate(f"w={weights[0]:.2f}x",
+                 xy=(pos[0], weights[0]),
+                 xytext=(10, -15), textcoords="offset points",
+                 fontsize=_FONT_SIZE["annotation"], color=_COLORS["green"])
+    ax2.annotate(f"w={weights[-1]:.2f}x",
+                 xy=(pos[-1], weights[-1]),
+                 xytext=(-40, 10), textcoords="offset points",
+                 fontsize=_FONT_SIZE["annotation"], color=_COLORS["red"])
+
+    # ---- Panel 3: Quartile fairness bar chart ----
+    ax3 = axes[2]
+
+    x = np.arange(4)
+    bar_w = 0.25
+    bars1 = ax3.bar(x - bar_w, q_uniform_frac, bar_w,
+                    color=_COLORS["gray"], alpha=0.7, edgecolor="white",
+                    linewidth=0.5, label="Uniform pricing (25% each)")
+    bars2 = ax3.bar(x, q_actual_frac, bar_w,
+                    color=_COLORS["blue"], alpha=0.8, edgecolor="white",
+                    linewidth=0.5, label="Actual energy share")
+    bars3 = ax3.bar(x + bar_w, q_model_frac, bar_w,
+                    color=_COLORS["orange"], alpha=0.8, edgecolor="white",
+                    linewidth=0.5, label="Position-aware pricing")
+
+    # Value labels on bars
+    for bars in [bars1, bars2, bars3]:
+        for bar in bars:
+            h = bar.get_height()
+            ax3.annotate(f"{h:.1f}%",
+                         xy=(bar.get_x() + bar.get_width() / 2, h),
+                         xytext=(0, 3), textcoords="offset points",
+                         ha="center", va="bottom",
+                         fontsize=_FONT_SIZE["annotation"] - 0.5)
+
+    ax3.set_xticks(x)
+    ax3.set_xticklabels(q_labels)
+    ax3.set_ylabel("Share of Total Cost (%)")
+    ax3.set_title("Cost Fairness by Quartile: Who Pays What?")
+    ax3.legend(loc="upper left", fontsize=_FONT_SIZE["legend"])
+    ax3.set_ylim(0, max(max(q_actual_frac), max(q_model_frac)) * 1.25)
+
+    # ---- Caption ----
+    q4_q1_ratio = eng[-q_size:].mean() / eng[:q_size].mean()
+    max_subsidy = (1 - weights[0]) * 100
+    max_penalty = (weights[-1] - 1) * 100
+    caption = (
+        f"Linear energy model: E(p) = {alpha:.0f} + {beta:.4f}p mJ  |  "
+        f"Q4/Q1 energy ratio = {q4_q1_ratio:.2f}x  |  "
+        f"Early tokens overpay by {max_subsidy:.0f}%, "
+        f"late tokens underpay by {max_penalty:.0f}% under uniform pricing"
+    )
+    _add_caption(fig, caption, y=-0.02)
+
+    _savefig(fig, os.path.join(output_dir, "token_cost_model.png"))
+
+    # ---- Print cost model summary ----
+    print(f"\n{'='*60}")
+    print(f"  POSITION-AWARE TOKEN COST MODEL")
+    print(f"{'='*60}")
+    print(f"  Linear model:  E(p) = {alpha:.2f} + {beta:.4f} * p  (mJ)")
+    print(f"  R-squared:     {r2:.4f}")
+    print(f"  Mean energy:   {overall_mean:.2f} mJ/token")
+    print(f"  Q4/Q1 ratio:   {q4_q1_ratio:.3f}x")
+    print(f"")
+    print(f"  Cost weight range:")
+    print(f"    Position {int(pos[0]):>6d}:  w = {weights[0]:.3f}x  "
+          f"(pays {weights[0]*100:.1f}% of uniform)")
+    print(f"    Position {int(pos[-1]):>6d}:  w = {weights[-1]:.3f}x  "
+          f"(pays {weights[-1]*100:.1f}% of uniform)")
+    if beta != 0:
+        crossover = (overall_mean - alpha) / beta
+        if pos[0] <= crossover <= pos[-1]:
+            print(f"    Crossover:     position {crossover:.0f}")
+    print(f"")
+    print(f"  Quartile analysis (% of total cost):")
+    print(f"    {'Quartile':<12s} {'Uniform':>10s} {'Actual':>10s} "
+          f"{'Model':>10s} {'Unfairness':>12s}")
+    for i in range(4):
+        unfairness = q_actual_frac[i] - q_uniform_frac[i]
+        sign = "+" if unfairness > 0 else ""
+        print(f"    {q_labels[i].replace(chr(10),' '):<12s} "
+              f"{q_uniform_frac[i]:>9.1f}% {q_actual_frac[i]:>9.1f}% "
+              f"{q_model_frac[i]:>9.1f}% {sign}{unfairness:>10.1f}pp")
+    print(f"")
+    print(f"  Formula for fair pricing:")
+    print(f"    cost(token_at_pos_p) = base_price * w(p)")
+    print(f"    where w(p) = ({alpha:.1f} + {beta:.4f} * p) / {overall_mean:.1f}")
+    print(f"{'='*60}")
+
+
+# ══════════════════════════════════════════════════════════════
 #  Main entry point
 # ══════════════════════════════════════════════════════════════
 
@@ -869,6 +1229,8 @@ def run_visualization(data_dir=None, output_dir=None, mode="auto"):
         plot_batch_step_vs_token_energy(pos_data, output_dir)
         plot_cumulative_energy(pos_data, output_dir)
         plot_energy_distribution(pos_data, output_dir)
+        plot_token_cost_model(pos_data, output_dir)
+        plot_ttft_latency(sample_data, output_dir)
         print_batch_summary(pos_data, [])
 
     elif mode == "batch":
@@ -896,6 +1258,7 @@ def run_visualization(data_dir=None, output_dir=None, mode="auto"):
         plot_batch_step_vs_token_energy(pos_data, output_dir)
         plot_cumulative_energy(pos_data, output_dir)
         plot_energy_distribution(pos_data, output_dir)
+        plot_token_cost_model(pos_data, output_dir)
         print_batch_summary(pos_data, step_raw_data)
 
     else:
@@ -920,6 +1283,7 @@ def run_visualization(data_dir=None, output_dir=None, mode="auto"):
         plot_cumulative_energy(pos_data, output_dir)
         plot_sample_comparison(sample_data, output_dir)
         plot_energy_distribution(pos_data, output_dir)
+        plot_token_cost_model(pos_data, output_dir)
         print_summary_table(pos_data, sample_data)
 
     print(f"\n✅ All figures saved to {output_dir}/")

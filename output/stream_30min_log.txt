@@ -1,0 +1,208 @@
+/home/llm/github_project/dssd/venv/lib/python3.10/site-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  📁 实验输出目录: /home/llm/github_project/dssd/output/token_energy_stream_Qwen3-8B_auto_n20_t12000_rate15_dur1800_w10_20260315_025234
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[UAV] Selected framework: PYTORCH
+INFO 03-15 02:52:34 [importing.py:53] Triton module has been replaced with a placeholder.
+/opt/rocm/lib/libamd_smi.so: cannot open shared object file: No such file or directory
+Unable to find libamd_smi.so library try installing amd-smi-lib from your package manager
+INFO 03-15 02:52:34 [__init__.py:239] Automatically detected platform cuda.
+[UAV Client] GPU compute capability 7.0 < 8.0, 使用 dtype=half, enforce_eager=True, compilation_level=0 (NO_COMPILATION)
+[UAV Client] Loading draft model with vLLM engine: /home/llm/model_hub/Qwen3-8B
+[UAV Client] tensor_parallel_size = 8, dtype = half
+`torch_dtype` is deprecated! Use `dtype` instead!
+WARNING 03-15 02:52:36 [config.py:2972] Casting torch.bfloat16 to torch.float16.
+INFO 03-15 02:52:45 [config.py:717] This model supports multiple tasks: {'generate', 'classify', 'reward', 'embed', 'score'}. Defaulting to 'generate'.
+WARNING 03-15 02:52:45 [arg_utils.py:1658] Compute Capability < 8.0 is not supported by the V1 Engine. Falling back to V0. 
+WARNING 03-15 02:52:45 [arg_utils.py:1536] The model has a long context length (40960). This may causeOOM during the initial memory profiling phase, or result in low performance due to small KV cache size. Consider setting --max-model-len to a smaller value.
+INFO 03-15 02:52:45 [config.py:1770] Defaulting to use mp for distributed inference
+WARNING 03-15 02:52:45 [cuda.py:93] To see benefits of async output processing, enable CUDA graph. Since, enforce-eager is enabled, async output processor cannot be used
+INFO 03-15 02:52:45 [llm_engine.py:240] Initializing a V0 LLM engine (v0.8.5) with config: model='/home/llm/model_hub/Qwen3-8B', speculative_config=None, tokenizer='/home/llm/model_hub/Qwen3-8B', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, override_neuron_config=None, tokenizer_revision=None, trust_remote_code=True, dtype=torch.float16, max_seq_len=40960, download_dir=None, load_format=auto, tensor_parallel_size=8, pipeline_parallel_size=1, disable_custom_all_reduce=False, quantization=None, enforce_eager=True, kv_cache_dtype=auto,  device_config=cuda, decoding_config=DecodingConfig(guided_decoding_backend='auto', reasoning_backend=None), observability_config=ObservabilityConfig(show_hidden_metrics=False, otlp_traces_endpoint=None, collect_model_forward_time=False, collect_model_execute_time=False), seed=None, served_model_name=/home/llm/model_hub/Qwen3-8B, num_scheduler_steps=1, multi_step_stream_outputs=True, enable_prefix_caching=None, chunked_prefill_enabled=False, use_async_output_proc=False, disable_mm_preprocessor_cache=False, mm_processor_kwargs=None, pooler_config=None, compilation_config={"level":0,"splitting_ops":[],"compile_sizes":[],"cudagraph_capture_sizes":[],"max_capture_size":0}, use_cached_outputs=False, 
+WARNING 03-15 02:52:46 [multiproc_worker_utils.py:306] Reducing Torch parallelism from 48 threads to 1 to avoid unnecessary CPU contention. Set OMP_NUM_THREADS in the external environment to tune this value as needed.
+[1;36m(VllmWorkerProcess pid=2621615)[0;0m INFO 03-15 02:52:46 [multiproc_worker_utils.py:225] Worker ready; awaiting tasks
+[1;36m(VllmWorkerProcess pid=2621616)[0;0m INFO 03-15 02:52:46 [multiproc_worker_utils.py:225] Worker ready; awaiting tasks
+[1;36m(VllmWorkerProcess pid=2621617)[0;0m INFO 03-15 02:52:46 [multiproc_worker_utils.py:225] Worker ready; awaiting tasks
+[1;36m(VllmWorkerProcess pid=2621618)[0;0m INFO 03-15 02:52:46 [multiproc_worker_utils.py:225] Worker ready; awaiting tasks
+[1;36m(VllmWorkerProcess pid=2621619)[0;0m INFO 03-15 02:52:46 [multiproc_worker_utils.py:225] Worker ready; awaiting tasks
+[1;36m(VllmWorkerProcess pid=2621620)[0;0m INFO 03-15 02:52:46 [multiproc_worker_utils.py:225] Worker ready; awaiting tasks
+[1;36m(VllmWorkerProcess pid=2621621)[0;0m INFO 03-15 02:52:46 [multiproc_worker_utils.py:225] Worker ready; awaiting tasks
+INFO 03-15 02:52:47 [cuda.py:240] Cannot use FlashAttention-2 backend for Volta and Turing GPUs.
+INFO 03-15 02:52:47 [cuda.py:289] Using XFormers backend.
+[1;36m(VllmWorkerProcess pid=2621620)[0;0m INFO 03-15 02:52:47 [cuda.py:240] Cannot use FlashAttention-2 backend for Volta and Turing GPUs.
+[1;36m(VllmWorkerProcess pid=2621620)[0;0m INFO 03-15 02:52:47 [cuda.py:289] Using XFormers backend.
+[1;36m(VllmWorkerProcess pid=2621621)[0;0m INFO 03-15 02:52:47 [cuda.py:240] Cannot use FlashAttention-2 backend for Volta and Turing GPUs.
+[1;36m(VllmWorkerProcess pid=2621621)[0;0m INFO 03-15 02:52:47 [cuda.py:289] Using XFormers backend.
+[1;36m(VllmWorkerProcess pid=2621618)[0;0m INFO 03-15 02:52:47 [cuda.py:240] Cannot use FlashAttention-2 backend for Volta and Turing GPUs.
+[1;36m(VllmWorkerProcess pid=2621618)[0;0m INFO 03-15 02:52:47 [cuda.py:289] Using XFormers backend.
+[1;36m(VllmWorkerProcess pid=2621619)[0;0m INFO 03-15 02:52:47 [cuda.py:240] Cannot use FlashAttention-2 backend for Volta and Turing GPUs.
+[1;36m(VllmWorkerProcess pid=2621619)[0;0m INFO 03-15 02:52:47 [cuda.py:289] Using XFormers backend.
+[1;36m(VllmWorkerProcess pid=2621617)[0;0m INFO 03-15 02:52:47 [cuda.py:240] Cannot use FlashAttention-2 backend for Volta and Turing GPUs.
+[1;36m(VllmWorkerProcess pid=2621617)[0;0m INFO 03-15 02:52:47 [cuda.py:289] Using XFormers backend.
+[1;36m(VllmWorkerProcess pid=2621615)[0;0m INFO 03-15 02:52:48 [cuda.py:240] Cannot use FlashAttention-2 backend for Volta and Turing GPUs.
+[1;36m(VllmWorkerProcess pid=2621615)[0;0m INFO 03-15 02:52:48 [cuda.py:289] Using XFormers backend.
+[1;36m(VllmWorkerProcess pid=2621616)[0;0m INFO 03-15 02:52:48 [cuda.py:240] Cannot use FlashAttention-2 backend for Volta and Turing GPUs.
+[1;36m(VllmWorkerProcess pid=2621616)[0;0m INFO 03-15 02:52:48 [cuda.py:289] Using XFormers backend.
+[1;36m(VllmWorkerProcess pid=2621616)[0;0m INFO 03-15 02:52:53 [utils.py:1055] Found nccl from library libnccl.so.2
+[1;36m(VllmWorkerProcess pid=2621615)[0;0m INFO 03-15 02:52:53 [utils.py:1055] Found nccl from library libnccl.so.2
+[1;36m(VllmWorkerProcess pid=2621617)[0;0m INFO 03-15 02:52:53 [utils.py:1055] Found nccl from library libnccl.so.2
+[1;36m(VllmWorkerProcess pid=2621617)[0;0m INFO 03-15 02:52:53 [pynccl.py:69] vLLM is using nccl==2.21.5
+[1;36m(VllmWorkerProcess pid=2621616)[0;0m INFO 03-15 02:52:53 [pynccl.py:69] vLLM is using nccl==2.21.5
+[1;36m(VllmWorkerProcess pid=2621615)[0;0m INFO 03-15 02:52:53 [pynccl.py:69] vLLM is using nccl==2.21.5
+[1;36m(VllmWorkerProcess pid=2621621)[0;0m INFO 03-15 02:52:53 [utils.py:1055] Found nccl from library libnccl.so.2
+[1;36m(VllmWorkerProcess pid=2621618)[0;0m INFO 03-15 02:52:53 [utils.py:1055] Found nccl from library libnccl.so.2
+[1;36m(VllmWorkerProcess pid=2621621)[0;0m INFO 03-15 02:52:53 [pynccl.py:69] vLLM is using nccl==2.21.5
+[1;36m(VllmWorkerProcess pid=2621618)[0;0m INFO 03-15 02:52:53 [pynccl.py:69] vLLM is using nccl==2.21.5
+[1;36m(VllmWorkerProcess pid=2621619)[0;0m INFO 03-15 02:52:53 [utils.py:1055] Found nccl from library libnccl.so.2
+[1;36m(VllmWorkerProcess pid=2621619)[0;0m INFO 03-15 02:52:53 [pynccl.py:69] vLLM is using nccl==2.21.5
+INFO 03-15 02:52:53 [utils.py:1055] Found nccl from library libnccl.so.2
+[1;36m(VllmWorkerProcess pid=2621620)[0;0m INFO 03-15 02:52:53 [utils.py:1055] Found nccl from library libnccl.so.2
+[1;36m(VllmWorkerProcess pid=2621620)[0;0m INFO 03-15 02:52:53 [pynccl.py:69] vLLM is using nccl==2.21.5
+INFO 03-15 02:52:53 [pynccl.py:69] vLLM is using nccl==2.21.5
+[1;36m(VllmWorkerProcess pid=2621620)[0;0m WARNING 03-15 02:52:54 [custom_all_reduce.py:136] Custom allreduce is disabled because it's not supported on more than two PCIe-only GPUs. To silence this warning, specify disable_custom_all_reduce=True explicitly.
+[1;36m(VllmWorkerProcess pid=2621621)[0;0m WARNING 03-15 02:52:54 [custom_all_reduce.py:136] Custom allreduce is disabled because it's not supported on more than two PCIe-only GPUs. To silence this warning, specify disable_custom_all_reduce=True explicitly.
+[1;36m(VllmWorkerProcess pid=2621618)[0;0m WARNING 03-15 02:52:54 [custom_all_reduce.py:136] Custom allreduce is disabled because it's not supported on more than two PCIe-only GPUs. To silence this warning, specify disable_custom_all_reduce=True explicitly.
+[1;36m(VllmWorkerProcess pid=2621619)[0;0m WARNING 03-15 02:52:54 [custom_all_reduce.py:136] Custom allreduce is disabled because it's not supported on more than two PCIe-only GPUs. To silence this warning, specify disable_custom_all_reduce=True explicitly.
+WARNING 03-15 02:52:54 [custom_all_reduce.py:136] Custom allreduce is disabled because it's not supported on more than two PCIe-only GPUs. To silence this warning, specify disable_custom_all_reduce=True explicitly.
+[1;36m(VllmWorkerProcess pid=2621617)[0;0m WARNING 03-15 02:52:54 [custom_all_reduce.py:136] Custom allreduce is disabled because it's not supported on more than two PCIe-only GPUs. To silence this warning, specify disable_custom_all_reduce=True explicitly.
+[1;36m(VllmWorkerProcess pid=2621616)[0;0m WARNING 03-15 02:52:54 [custom_all_reduce.py:136] Custom allreduce is disabled because it's not supported on more than two PCIe-only GPUs. To silence this warning, specify disable_custom_all_reduce=True explicitly.
+[1;36m(VllmWorkerProcess pid=2621615)[0;0m WARNING 03-15 02:52:54 [custom_all_reduce.py:136] Custom allreduce is disabled because it's not supported on more than two PCIe-only GPUs. To silence this warning, specify disable_custom_all_reduce=True explicitly.
+INFO 03-15 02:52:54 [shm_broadcast.py:266] vLLM message queue communication handle: Handle(local_reader_ranks=[1, 2, 3, 4, 5, 6, 7], buffer_handle=(7, 4194304, 6, 'psm_20b4bbc0'), local_subscribe_addr='ipc:///tmp/717355aa-b4da-40ca-adb4-e0db038a414d', remote_subscribe_addr=None, remote_addr_ipv6=False)
+INFO 03-15 02:52:54 [parallel_state.py:1004] rank 0 in world size 8 is assigned as DP rank 0, PP rank 0, TP rank 0
+[1;36m(VllmWorkerProcess pid=2621615)[0;0m INFO 03-15 02:52:54 [parallel_state.py:1004] rank 1 in world size 8 is assigned as DP rank 0, PP rank 0, TP rank 1
+[1;36m(VllmWorkerProcess pid=2621620)[0;0m INFO 03-15 02:52:54 [parallel_state.py:1004] rank 6 in world size 8 is assigned as DP rank 0, PP rank 0, TP rank 6
+[1;36m(VllmWorkerProcess pid=2621616)[0;0m INFO 03-15 02:52:54 [parallel_state.py:1004] rank 2 in world size 8 is assigned as DP rank 0, PP rank 0, TP rank 2
+[1;36m(VllmWorkerProcess pid=2621621)[0;0m INFO 03-15 02:52:54 [parallel_state.py:1004] rank 7 in world size 8 is assigned as DP rank 0, PP rank 0, TP rank 7
+[1;36m(VllmWorkerProcess pid=2621619)[0;0m INFO 03-15 02:52:54 [parallel_state.py:1004] rank 5 in world size 8 is assigned as DP rank 0, PP rank 0, TP rank 5
+[1;36m(VllmWorkerProcess pid=2621618)[0;0m [1;36m(VllmWorkerProcess pid=2621617)[0;0m INFO 03-15 02:52:54 [parallel_state.py:1004] rank 4 in world size 8 is assigned as DP rank 0, PP rank 0, TP rank 4
+INFO 03-15 02:52:54 [parallel_state.py:1004] rank 3 in world size 8 is assigned as DP rank 0, PP rank 0, TP rank 3
+INFO 03-15 02:52:54 [model_runner.py:1108] Starting to load model /home/llm/model_hub/Qwen3-8B...
+[1;36m(VllmWorkerProcess pid=2621618)[0;0m INFO 03-15 02:52:54 [model_runner.py:1108] Starting to load model /home/llm/model_hub/Qwen3-8B...
+[1;36m(VllmWorkerProcess pid=2621616)[0;0m INFO 03-15 02:52:54 [model_runner.py:1108] Starting to load model /home/llm/model_hub/Qwen3-8B...
+[1;36m(VllmWorkerProcess pid=2621619)[0;0m INFO 03-15 02:52:54 [model_runner.py:1108] Starting to load model /home/llm/model_hub/Qwen3-8B...
+[1;36m(VllmWorkerProcess pid=2621615)[0;0m INFO 03-15 02:52:54 [model_runner.py:1108] Starting to load model /home/llm/model_hub/Qwen3-8B...
+[1;36m(VllmWorkerProcess pid=2621620)[0;0m INFO 03-15 02:52:54 [model_runner.py:1108] Starting to load model /home/llm/model_hub/Qwen3-8B...
+[1;36m(VllmWorkerProcess pid=2621621)[0;0m INFO 03-15 02:52:54 [model_runner.py:1108] Starting to load model /home/llm/model_hub/Qwen3-8B...
+[1;36m(VllmWorkerProcess pid=2621617)[0;0m INFO 03-15 02:52:54 [model_runner.py:1108] Starting to load model /home/llm/model_hub/Qwen3-8B...
+Loading safetensors checkpoint shards:   0% Completed | 0/5 [00:00<?, ?it/s]
+Loading safetensors checkpoint shards:  20% Completed | 1/5 [00:00<00:00,  5.28it/s]
+Loading safetensors checkpoint shards:  40% Completed | 2/5 [00:00<00:01,  2.32it/s]
+Loading safetensors checkpoint shards:  60% Completed | 3/5 [00:01<00:01,  1.94it/s]
+Loading safetensors checkpoint shards:  80% Completed | 4/5 [00:02<00:00,  1.81it/s]
+[1;36m(VllmWorkerProcess pid=2621616)[0;0m INFO 03-15 02:52:56 [loader.py:458] Loading weights took 2.14 seconds
+[1;36m(VllmWorkerProcess pid=2621618)[0;0m INFO 03-15 02:52:57 [loader.py:458] Loading weights took 2.45 seconds
+[1;36m(VllmWorkerProcess pid=2621619)[0;0m INFO 03-15 02:52:57 [loader.py:458] Loading weights took 2.50 seconds
+[1;36m(VllmWorkerProcess pid=2621620)[0;0m INFO 03-15 02:52:57 [loader.py:458] Loading weights took 2.54 seconds
+Loading safetensors checkpoint shards: 100% Completed | 5/5 [00:02<00:00,  1.85it/s]
+Loading safetensors checkpoint shards: 100% Completed | 5/5 [00:02<00:00,  1.97it/s]
+
+[1;36m(VllmWorkerProcess pid=2621617)[0;0m INFO 03-15 02:52:57 [loader.py:458] Loading weights took 2.54 seconds
+[1;36m(VllmWorkerProcess pid=2621621)[0;0m INFO 03-15 02:52:57 [loader.py:458] Loading weights took 2.55 seconds
+INFO 03-15 02:52:57 [loader.py:458] Loading weights took 2.56 seconds
+[1;36m(VllmWorkerProcess pid=2621615)[0;0m INFO 03-15 02:52:57 [loader.py:458] Loading weights took 2.58 seconds
+[1;36m(VllmWorkerProcess pid=2621616)[0;0m INFO 03-15 02:52:57 [model_runner.py:1140] Model loading took 1.9175 GiB and 2.358117 seconds
+[1;36m(VllmWorkerProcess pid=2621619)[0;0m INFO 03-15 02:52:57 [model_runner.py:1140] Model loading took 1.9175 GiB and 2.691876 seconds
+[1;36m(VllmWorkerProcess pid=2621620)[0;0m INFO 03-15 02:52:57 [model_runner.py:1140] Model loading took 1.9175 GiB and 2.727013 seconds
+[1;36m(VllmWorkerProcess pid=2621621)[0;0m INFO 03-15 02:52:57 [model_runner.py:1140] Model loading took 1.9175 GiB and 2.739292 seconds
+INFO 03-15 02:52:57 [model_runner.py:1140] Model loading took 1.9175 GiB and 2.754472 seconds
+[1;36m(VllmWorkerProcess pid=2621618)[0;0m INFO 03-15 02:52:57 [model_runner.py:1140] Model loading took 1.9175 GiB and 2.654703 seconds
+[1;36m(VllmWorkerProcess pid=2621617)[0;0m INFO 03-15 02:52:57 [model_runner.py:1140] Model loading took 1.9175 GiB and 2.733593 seconds
+[1;36m(VllmWorkerProcess pid=2621615)[0;0m INFO 03-15 02:52:57 [model_runner.py:1140] Model loading took 1.9175 GiB and 2.778021 seconds
+[1;36m(VllmWorkerProcess pid=2621617)[0;0m INFO 03-15 02:53:02 [worker.py:287] Memory profiling takes 4.10 seconds
+[1;36m(VllmWorkerProcess pid=2621617)[0;0m INFO 03-15 02:53:02 [worker.py:287] the current vLLM instance can use total_gpu_memory (31.73GiB) x gpu_memory_utilization (0.85) = 26.97GiB
+[1;36m(VllmWorkerProcess pid=2621617)[0;0m INFO 03-15 02:53:02 [worker.py:287] model weights take 1.92GiB; non_torch_memory takes 1.01GiB; PyTorch activation peak memory takes 1.92GiB; the rest of the memory reserved for KV Cache is 22.12GiB.
+[1;36m(VllmWorkerProcess pid=2621616)[0;0m INFO 03-15 02:53:02 [worker.py:287] Memory profiling takes 4.11 seconds
+[1;36m(VllmWorkerProcess pid=2621616)[0;0m INFO 03-15 02:53:02 [worker.py:287] the current vLLM instance can use total_gpu_memory (31.73GiB) x gpu_memory_utilization (0.85) = 26.97GiB
+[1;36m(VllmWorkerProcess pid=2621616)[0;0m INFO 03-15 02:53:02 [worker.py:287] model weights take 1.92GiB; non_torch_memory takes 0.96GiB; PyTorch activation peak memory takes 1.92GiB; the rest of the memory reserved for KV Cache is 22.17GiB.
+[1;36m(VllmWorkerProcess pid=2621620)[0;0m INFO 03-15 02:53:02 [worker.py:287] Memory profiling takes 4.11 seconds
+[1;36m(VllmWorkerProcess pid=2621620)[0;0m INFO 03-15 02:53:02 [worker.py:287] the current vLLM instance can use total_gpu_memory (31.73GiB) x gpu_memory_utilization (0.85) = 26.97GiB
+[1;36m(VllmWorkerProcess pid=2621620)[0;0m INFO 03-15 02:53:02 [worker.py:287] model weights take 1.92GiB; non_torch_memory takes 1.23GiB; PyTorch activation peak memory takes 1.92GiB; the rest of the memory reserved for KV Cache is 21.90GiB.
+[1;36m(VllmWorkerProcess pid=2621621)[0;0m INFO 03-15 02:53:02 [worker.py:287] Memory profiling takes 4.13 seconds
+[1;36m(VllmWorkerProcess pid=2621621)[0;0m INFO 03-15 02:53:02 [worker.py:287] the current vLLM instance can use total_gpu_memory (31.73GiB) x gpu_memory_utilization (0.85) = 26.97GiB
+[1;36m(VllmWorkerProcess pid=2621621)[0;0m INFO 03-15 02:53:02 [worker.py:287] model weights take 1.92GiB; non_torch_memory takes 1.08GiB; PyTorch activation peak memory takes 1.92GiB; the rest of the memory reserved for KV Cache is 22.05GiB.
+[1;36m(VllmWorkerProcess pid=2621619)[0;0m INFO 03-15 02:53:02 [worker.py:287] Memory profiling takes 4.13 seconds
+[1;36m(VllmWorkerProcess pid=2621619)[0;0m INFO 03-15 02:53:02 [worker.py:287] the current vLLM instance can use total_gpu_memory (31.73GiB) x gpu_memory_utilization (0.85) = 26.97GiB
+[1;36m(VllmWorkerProcess pid=2621619)[0;0m INFO 03-15 02:53:02 [worker.py:287] model weights take 1.92GiB; non_torch_memory takes 1.12GiB; PyTorch activation peak memory takes 1.92GiB; the rest of the memory reserved for KV Cache is 22.01GiB.
+[1;36m(VllmWorkerProcess pid=2621615)[0;0m INFO 03-15 02:53:02 [worker.py:287] Memory profiling takes 4.15 seconds
+[1;36m(VllmWorkerProcess pid=2621615)[0;0m INFO 03-15 02:53:02 [worker.py:287] the current vLLM instance can use total_gpu_memory (31.73GiB) x gpu_memory_utilization (0.85) = 26.97GiB
+[1;36m(VllmWorkerProcess pid=2621615)[0;0m INFO 03-15 02:53:02 [worker.py:287] model weights take 1.92GiB; non_torch_memory takes 1.11GiB; PyTorch activation peak memory takes 1.92GiB; the rest of the memory reserved for KV Cache is 22.02GiB.
+[1;36m(VllmWorkerProcess pid=2621618)[0;0m INFO 03-15 02:53:02 [worker.py:287] Memory profiling takes 4.09 seconds
+[1;36m(VllmWorkerProcess pid=2621618)[0;0m INFO 03-15 02:53:02 [worker.py:287] the current vLLM instance can use total_gpu_memory (31.73GiB) x gpu_memory_utilization (0.85) = 26.97GiB
+[1;36m(VllmWorkerProcess pid=2621618)[0;0m INFO 03-15 02:53:02 [worker.py:287] model weights take 1.92GiB; non_torch_memory takes 0.99GiB; PyTorch activation peak memory takes 1.92GiB; the rest of the memory reserved for KV Cache is 22.14GiB.
+INFO 03-15 02:53:02 [worker.py:287] Memory profiling takes 4.19 seconds
+INFO 03-15 02:53:02 [worker.py:287] the current vLLM instance can use total_gpu_memory (31.73GiB) x gpu_memory_utilization (0.85) = 26.97GiB
+INFO 03-15 02:53:02 [worker.py:287] model weights take 1.92GiB; non_torch_memory takes 1.22GiB; PyTorch activation peak memory takes 1.92GiB; the rest of the memory reserved for KV Cache is 21.91GiB.
+INFO 03-15 02:53:02 [executor_base.py:112] # cuda blocks: 79742, # CPU blocks: 14563
+INFO 03-15 02:53:02 [executor_base.py:117] Maximum concurrency for 40960 tokens per request: 31.15x
+INFO 03-15 02:53:05 [llm_engine.py:437] init engine (profile, create kv cache, warmup model) took 8.26 seconds
+[UAV] Draft model loaded with vLLM engine
+[UAV] Model: /home/llm/model_hub/Qwen3-8B
+
+############################################################
+# STREAM TOKEN-LEVEL ENERGY BENCHMARK
+# Request rate: 15.0 req/min
+# Duration: 1800s (30.0 min)
+# Expected requests per round: ~450
+# Warmup requests: 10
+# Energy recording: decode only (prefill skipped)
+# Max tokens per request: 12000
+# Prompt pool size: 20
+# Repeats: 1
+# Base seed: 42
+############################################################
+
+[StreamTokenEnergy] 监控 GPU: [0, 1, 2, 3, 4, 5, 6, 7]
+[DatasetPool] 加载 WizardLM: 143000 条
+[DatasetPool] 加载 LongForm: 23652 条
+[DatasetPool] 加载 python_code: 18612 条
+[DatasetPool] 采样 20 条 prompt, 来源分布: {'WizardLM': 6, 'LongForm': 9, 'python_code': 5}
+
+[Round 1/1] seed=42, pool=20 prompts, prompt lengths: min=9, max=340, avg=91
+
+============================================================
+  ROUND 1 / 1  (rate=15.0 req/min, duration=1800s)
+============================================================
+/opt/rocm/lib/libamd_smi.so: cannot open shared object file: No such file or directory
+Unable to find libamd_smi.so library try installing amd-smi-lib from your package manager
+[2026-03-15 02:53:10,001] [zeus.device.gpu.nvidia](nvidia.py:47) pynvml is available and initialized.
+[2026-03-15 02:53:10,002] [zeus.device.cpu.rapl](rapl.py:139) RAPL is available.
+[2026-03-15 02:53:10,002] [zeus.monitor.energy](energy.py:209) Monitoring GPU indices [0, 1, 2, 3, 4, 5, 6, 7].
+[2026-03-15 02:53:10,002] [zeus.monitor.energy](energy.py:210) Monitoring CPU indices []
+[TokenEnergyTracker] Zeus 已就绪 (approx_instant_energy=True), 监控 GPU: [0, 1, 2, 3, 4, 5, 6, 7]
+[StreamStep] ⏳ Warmup: 预注入 10 个请求...
+    [Warmup] ✅ 10 个请求已完成 prefill (1 steps), 开始正式实验
+[StreamStep] 开始流式生成: req_rate=15.0 req/min, duration=1800s, max_tokens=12000
+    注入间隔: 4.00s, prompt pool: 20, warmup: 10
+    [StreamStep] 注入请求 #1 (pool=10, prompt_len=103, t=0.0s)
+[2026-03-15 02:53:10,219] [zeus.utils.framework](framework.py:25) PyTorch with CUDA support is available.
+    step 1: t=0s, injected=11 (warmup=10), decode_active=0, prefill=1, finished=0
+    step 2: t=2s, injected=11 (warmup=10), decode_active=11, prefill=0, finished=0
+    step 3: t=2s, injected=11 (warmup=10), decode_active=11, prefill=0, finished=0
+    step 4: t=2s, injected=11 (warmup=10), decode_active=11, prefill=0, finished=0
+    step 5: t=2s, injected=11 (warmup=10), decode_active=11, prefill=0, finished=0
+    [StreamStep] 注入请求 #2 (pool=11, prompt_len=84, t=4.0s)
+    [StreamStep] 注入请求 #3 (pool=12, prompt_len=44, t=8.0s)
+    [StreamStep] 注入请求 #4 (pool=13, prompt_len=193, t=12.0s)
+    [StreamStep] 注入请求 #5 (pool=14, prompt_len=309, t=16.0s)
+    step 500: t=27s, injected=17 (warmup=10), decode_active=17, prefill=0, finished=0
+    step 1000: t=53s, injected=24 (warmup=10), decode_active=24, prefill=0, finished=0
+    step 1500: t=79s, injected=30 (warmup=10), decode_active=30, prefill=0, finished=0
+    step 2000: t=107s, injected=37 (warmup=10), decode_active=37, prefill=0, finished=0
+    step 2500: t=136s, injected=45 (warmup=10), decode_active=43, prefill=0, finished=2
+    step 3000: t=167s, injected=52 (warmup=10), decode_active=50, prefill=0, finished=2
+    [StreamStep] 注入请求 #50 (pool=19, prompt_len=12, t=196.1s)
+    step 3500: t=198s, injected=60 (warmup=10), decode_active=57, prefill=0, finished=3
+    step 4000: t=232s, injected=69 (warmup=10), decode_active=65, prefill=0, finished=4
+    step 4500: t=269s, injected=78 (warmup=10), decode_active=73, prefill=0, finished=5
+    step 5000: t=308s, injected=88 (warmup=10), decode_active=82, prefill=0, finished=6
+    step 5500: t=351s, injected=98 (warmup=10), decode_active=92, prefill=0, finished=6
+    [StreamStep] 注入请求 #100 (pool=9, prompt_len=30, t=396.1s)
+    step 6000: t=398s, injected=110 (warmup=10), decode_active=102, prefill=0, finished=8
+    step 6500: t=448s, injected=123 (warmup=10), decode_active=114, prefill=0, finished=9
+    step 7000: t=506s, injected=137 (warmup=10), decode_active=128, prefill=0, finished=9
+    step 7500: t=572s, injected=154 (warmup=10), decode_active=145, prefill=0, finished=9
+    [StreamStep] 注入请求 #150 (pool=19, prompt_len=12, t=596.0s)
+    step 8000: t=649s, injected=173 (warmup=10), decode_active=163, prefill=0, finished=10
+/usr/lib/python3.10/multiprocessing/resource_tracker.py:224: UserWarning: resource_tracker: There appear to be 1 leaked shared_memory objects to clean up at shutdown
+  warnings.warn('resource_tracker: There appear to be %d '

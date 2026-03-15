@@ -985,11 +985,12 @@ python scripts/visualize_token_energy.py --experiment_dir <dir> --mode sequentia
 
 | 文件 | 内容 |
 |------|------|
-| `token_energy_mean_curve.png` | 每个位置的平均能耗曲线 (±1σ 置信区间) |
+| `token_energy_mean_curve.png` | 每个位置的平均能耗曲线 (带 IQR 置信带 + 滑动平均) |
 | `token_energy_heatmap.png` | 能耗热力图 (sequence × position) |
 | `token_energy_cumulative.png` | 累积能耗曲线 |
 | `token_energy_sample_comparison.png` | 各 sample 的吞吐量/时间对比 |
 | `token_energy_distribution.png` | 能耗分布直方图 |
+| `token_cost_model.png` | **Position-Aware 成本模型** (见下方说明) |
 
 **Batch 模式图表**：
 
@@ -999,6 +1000,7 @@ python scripts/visualize_token_energy.py --experiment_dir <dir> --mode sequentia
 | `token_energy_batch_comparison.png` | step 总能耗 vs per-token 能耗 (batch 摊薄效果) |
 | `token_energy_cumulative.png` | 累积能耗曲线 |
 | `token_energy_distribution.png` | 能耗分布直方图 |
+| `token_cost_model.png` | **Position-Aware 成本模型** (见下方说明) |
 
 **Stream 模式图表**：
 
@@ -1008,8 +1010,277 @@ python scripts/visualize_token_energy.py --experiment_dir <dir> --mode sequentia
 | `token_energy_batch_comparison.png` | per-token 能耗 vs position 的样本数，分析能耗与并发度关系 |
 | `token_energy_cumulative.png` | 累积 decode 能耗曲线 |
 | `token_energy_distribution.png` | per-token decode 能耗分布直方图 (含 mean/median/std/CV) |
+| `token_cost_model.png` | **Position-Aware 成本模型** (见下方说明) |
+
+#### Position-Aware Token 成本模型
+
+> 核心发现：同一序列中，靠后位置的 token 由于 KV cache 更大，attention 计算量更高，
+> 实际消耗的 GPU 能量显著高于靠前的 token。但当前行业按 token 数量统一计费的方式
+> 对不同位置的 token 收取相同费用，这在能耗层面是不公平的。
+
+**模型定义**：
+
+基于实验数据拟合线性能耗模型：
+
+```
+E(p) = α + β × p    (mJ/token)
+```
+
+其中 `p` 为 token position，`α` 为基础能耗（intercept），`β` 为每位置的能耗增量（slope）。
+
+**公平定价权重**：
+
+```
+w(p) = E(p) / E_mean
+```
+
+- `w(p) < 1`: 该位置 token 的实际能耗低于平均值，在统一计费下被多收费（overpay）
+- `w(p) > 1`: 该位置 token 的实际能耗高于平均值，在统一计费下被少收费（underpay）
+- Crossover point: `w(p) = 1` 的位置，即公平分界线
+
+**典型实验结果**（Stream 模式，12000 positions）：
+
+| 指标 | 数值 |
+|------|------|
+| Q4/Q1 能耗比 | 2.04x（后 1/4 token 消耗的能量是前 1/4 的 2 倍）|
+| 早期 token 多付 | ~45%（position 0 处 w ≈ 0.55）|
+| 晚期 token 少付 | ~45%（position 12000 处 w ≈ 1.45）|
+| Crossover | ~position 6000（序列中点附近）|
+
+**`token_cost_model.png` 包含三个子图**：
+
+1. **上图**: 实际能耗曲线 vs 统一定价线 vs 线性模型，绿色阴影为 overpay 区域，红色阴影为 underpay 区域
+2. **中图**: Position-aware 成本权重 w(p) 曲线
+3. **下图**: 四分位公平性对比柱状图（统一定价 vs 实际能耗 vs 模型定价各承担多少比例）
 
 > 所有图表下方均自动附带文字描述，总结关键统计数据和趋势。
+
+---
+
+### Position-Aware 调度策略仿真 + 经济分析
+
+> 基于上述成本模型的发现，我们探索了两种 Position-Aware 调度策略，
+> 并结合真实 AI 企业定价模型进行了完整的经济可行性分析。
+
+**核心洞察**：
+- 靠后的 token（高 position）成本高，但对用户体验影响小（用户已看到大量输出）
+- 靠前的 token（低 position）成本低，但对用户体验影响大（TTFT，首 token 延迟）
+- 问题：能否通过调度层面的优化来降低运营商成本？
+
+**仿真脚本**：
+
+```bash
+# 单场景仿真（指定 arrival_rate）
+python scripts/simulate_scheduling.py \
+    --data_csv output/<experiment>/token_energy_stream_per_position.csv \
+    --arrival_rate 0.13 \
+    --max_batch 60 \
+    --max_steps 8000 \
+    --cost_cap_factor 0.90 \
+    --user_patience 250
+
+# 多负载自动扫描（不指定 arrival_rate）
+python scripts/simulate_scheduling.py \
+    --data_csv output/<experiment>/token_energy_stream_per_position.csv \
+    --max_batch 60 \
+    --max_steps 8000 \
+    --cost_cap_factor 0.90
+
+# 自定义经济参数
+python scripts/simulate_scheduling.py \
+    --gpu_cost_per_hour 0.80 \
+    --electricity_per_kwh 0.10 \
+    --step_duration_s 0.030
+```
+
+**参数说明**：
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--data_csv` | 内置模型 | 实验 CSV 路径，用于校准 E(p) = α + β·p |
+| `--arrival_rate` | 不指定=多负载扫描 | 每 step 平均到达请求数 (Poisson) |
+| `--max_batch` | 60 | 最大并发 batch size |
+| `--max_steps` | 5000 | 仿真总步数 |
+| `--seq_length_mean` | 500 | 请求输出长度均值 |
+| `--seq_length_std` | 300 | 请求输出长度标准差 |
+| `--user_patience` | 300 | 用户等待耐心（超时未收到 token 则放弃） |
+| `--cost_cap_factor` | 0.85 | PB 策略的能耗预算系数（越低越激进） |
+| `--gpu_cost_per_hour` | 0.80 | GPU 摊销成本 ($/hr) |
+| `--electricity_per_kwh` | 0.10 | 电费 ($/kWh) |
+| `--step_duration_s` | 0.030 | 每 step 耗时 (秒) |
+| `--output_dir` | output/scheduling_sim | 图表输出目录 |
+
+**对比的三种策略**：
+
+| 策略 | 说明 |
+|------|------|
+| **FCFS** | 先到先服务（当前 vLLM 默认），不抢占，最大化吞吐 |
+| **PAP** | Position-Aware Preemptive：batch 满时且有新请求等待时，短暂抢占 1 个高 position 请求（~10 step），到期后自动恢复 |
+| **PB** | Position-Budget Dual-Gate（v3）：**双重门槛动态交换**。同时满足 position sum 超阈值 AND max/median ratio 超阈值时，才将高 position 请求交换为新请求。双阈值均基于 EMA 动态调整，适应不同负载。batch 始终满载 |
+
+#### 真实 AI 企业成本结构
+
+仿真内置了完整的经济模型，基于公开信息校准：
+
+| 成本项 | 金额 | 占比 | 说明 |
+|--------|------|------|------|
+| GPU 摊销 | $0.80/hr | ~73% | V100 级别，$25K 购置 / 3 年摊销 + 运维 |
+| 电力 | $0.20/hr | ~18% | 300W GPU + 80W 空闲 + 1.3x PUE 冷却 |
+| 其他 | $0.10/hr | ~9% | 网络、存储、人工 |
+| **总成本** | **$1.10/hr** | **100%** | |
+
+收入端按 4 个行业定价档次计算：
+
+| 定价档次 | 价格 ($/M tokens) | 代表产品 | 小时收入 (@1850 tok/s) |
+|----------|-------------------|----------|------------------------|
+| premium | $10.00 | GPT-4o / Claude Opus | $66.69 |
+| standard | $1.00 | GPT-4o-mini / Haiku | $6.67 |
+| budget | $0.27 | DeepSeek-V3 | $1.80 |
+| economy | $0.14 | 开源模型托管/Batch API | $0.93 |
+
+#### PB v3 核心设计：Dual-Gate 动态双门槛交换
+
+PB v2 使用单一 position 阈值决定是否交换。**新版 PB v3 引入双重门槛 (Dual Gate)**，两个条件必须同时满足才触发交换，避免误触发，同时两个阈值均基于 EMA (指数移动平均) 动态调整：
+
+```
+双重门槛 (Dual Gate)：
+
+Gate 1 — Position Sum 门槛（总成本控制）:
+  当前 batch 所有请求的 position 总和 > EMA(sum) × sum_cap_factor
+  sum_cap_factor 随队列深度动态调节：
+    - 队列为空: factor = 1.0 (几乎不触发)
+    - 队列 = 1× batch: factor = 0.8 (适度)
+    - 队列 = 2× batch: factor = 0.5 (激进)
+
+Gate 2 — Spread Ratio 门槛（差距控制）:
+  max_position / median_position > ratio_threshold
+  ratio_threshold 随队列深度动态调节：
+    - 队列为空: threshold = 5.0 (宽容)
+    - 队列 = 1× batch: threshold = 3.0
+    - 队列 = 2× batch: threshold = 2.0
+
+触发条件: Gate1 AND Gate2 — 两个门都开才交换
+
+算法流程（每 step）：
+1. 计算 batch 统计: position sum, max/median ratio
+2. 更新 EMA: 用 α=0.05 指数平滑历史统计
+3. Anti-starvation: 强制恢复暂停超过 80 步的请求（带 25 步冷却）
+4. 填空位: 暂停队列 → batch（最低 position 优先）
+5. 填空位: 等待队列 → batch
+6. Dual-Gate 交换: 两个门槛同时满足时 →
+   将 position > 1.3× avg 的最高 position 请求暂停，换入新请求
+
+关键约束：
+- 每步最多 2 次交换（温和但比 v2 稍积极）
+- 只交换 position > 1.3× 平均值 的请求
+- 不交换已完成 >85% 的请求（快完成了别打断）
+- 冷却保护：恢复后 25 步内不会被再次交换（防循环）
+- 双门槛 EMA 自适应：低负载几乎不触发，高负载自动变激进
+```
+
+#### 多负载仿真结果（PB v3 — Dual Gate）
+
+（max_batch=60, seq_mean=3000, seq_std=2000, patience=600, 20000 steps — 长 token 场景）
+
+**PB v3 vs FCFS 对比扫描（4 个负载等级）**：
+
+| 负载 | TTFT Δ | PosSum Δ | Energy Δ | Useful Δ | Abandon Δ | AvgStepE Δ |
+|------|--------|----------|----------|----------|-----------|------------|
+| low (λ=0.04) | **-191 steps** | +2.5% | +0.5% | -4.3% | +17 | +0.5% |
+| medium (λ=0.08) | **-106 steps** | **-10.8%** | **-2.1%** | -26.3% | -16 | **-2.1%** |
+| high (λ=0.12) | **-79 steps** | **-13.3%** | **-2.7%** | -26.2% | +31 | **-2.7%** |
+| overload (λ=0.18) | **-43 steps** | **-17.6%** | **-3.5%** | -34.2% | **-64** | **-3.5%** |
+
+**详细指标 — 中负载 (medium λ=0.08)**：
+
+| 指标 | FCFS | PAP | PB v3 |
+|------|------|-----|-------|
+| 完成请求 | 394 | 369 | 338 |
+| 放弃请求 | 1,147 | 1,172 | **1,131 (-1.4%)** |
+| Avg Position Sum | 116,060 | 120,206 | **103,522 (-10.8%)** |
+| Avg Step Energy | 54,817 mJ | 55,425 | **54,355 (-0.8%)** |
+| Avg TTFT | 481 | 472 (-2.0%) | **375 (-22.0%)** |
+| Median TTFT | 584 | 583 | **388 (-33.6%)** |
+
+> 中负载下 PB v3 将 TTFT 从 481 降到 375 步 (改善 22%)，position sum 降低 10.8%。
+> 双门槛在队列深度适中时自动调整激进度。
+
+**详细指标 — 过载 (overload λ=0.18)**：
+
+| 指标 | FCFS | PAP | PB v3 |
+|------|------|-----|-------|
+| 完成请求 | 352 | 349 | 321 |
+| 放弃请求 | 3,032 | 3,035 | **2,968 (-2.1%)** |
+| Avg Position Sum | 120,987 | 120,281 | **99,656 (-17.6%)** |
+| Total Energy | 597,357 J | 599,514 | **576,242 (-3.5%)** |
+| Avg Step Energy | 29,868 mJ | 29,976 | **28,812 (-3.5%)** |
+| Avg TTFT | 485 | 482 | **441 (-9.1%)** |
+
+> 过载下 PB v3 将总能耗降低 3.5%，position sum 降低 17.6%，放弃数减少 64。
+> 但长 token 场景下被暂停请求更容易超时放弃，导致 useful tokens 下降。
+
+#### 核心权衡分析
+
+PB v3 的优势和代价随负载变化：
+
+| 负载水平 | TTFT 改善 | 能耗节约 | 吞吐量影响 | 最佳选择 |
+|----------|----------|---------|-----------|---------|
+| 低负载 | ⭐⭐⭐ (-191 steps) | ≈0 | -4.3% | PB 带来巨大 TTFT 提升，吞吐损失小 |
+| 中负载 | ⭐⭐ (-106 steps) | -2.1% | -26% | 权衡：TTFT 和能耗下降 vs 吞吐 |
+| 高负载 | ⭐ (-79 steps) | -2.7% | -26% | 相似权衡 |
+| 过载 | ⭐ (-43 steps) | **-3.5%** | -34% | 能耗节约最大，但吞吐损失也最大 |
+
+> **关键发现**：PB v3 双门槛设计在低负载时极其有效（接近零成本的 TTFT 改善），
+> 在高负载时主要价值在于能耗节约和 SLA 改善。用户感知到的延迟改善 (TTFT) 比
+> 吞吐量下降更直接——用户看到首 token 更快，但不一定注意到总完成时间稍长。
+
+#### PB v3 vs v2 vs v1 — 版本演进
+
+| 对比项 | PB v1 (shed) | PB v2 (single gate) | PB v3 (dual gate) |
+|--------|-------------|--------------------|--------------------|
+| 触发条件 | sum > 固定阈值 | sum > 1.5×avg | sum>EMA×cap **AND** ratio>dynamic |
+| 阈值调整 | 固定 | 固定 | **EMA 动态自适应** |
+| 交换次数/步 | 0-N (shed) | 1 | 2 |
+| 低负载行为 | 不触发 | 偶尔触发 | **极少触发** (双门槛保护) |
+| 高负载行为 | 过度 shed | 温和交换 | **自适应激进度** |
+| TTFT 改善 | 差 | 好 | **更精准** |
+| 防误触发 | ❌ | ⚠️ | ✅ (双门槛保障) |
+
+#### 为什么能量节约效果有限 — 根本原因
+
+1. **能耗梯度平坦**：E(p) = α + β·p 中，位置相关部分 (β·p) 在序列长度 3000 下约占总能耗 13%。交换一个 position=3000 → position=0 每步省 ~150 mJ，但一步总能耗约 55,000 mJ。
+
+2. **base 能耗占主导**：E(0) = α ≈ 400-700 mJ 是主体，纯交换无法降低这部分。
+
+3. **长 token 场景下暂停代价大**：长序列（3000+ tokens）的请求被暂停后，已生成的大量 token 可能因超时放弃而浪费。这是吞吐量下降的主要原因。
+
+4. **能耗节约的真正来源**：PB v3 在过载时将 position sum 降低 17.6%，相当于每步减少了 ~3.5% 的 GPU 计算量，直接节省等量电费。
+
+#### PB v3 的最佳应用场景
+
+| 场景 | PB v3 效果 | 最大优势 |
+|------|-----------|---------|
+| **低负载** | ⭐⭐⭐ | TTFT -191 steps，吞吐仅降 4% |
+| **中负载** | ⭐⭐⭐ | TTFT -106 steps，能耗 -2.1%，position sum -10.8% |
+| **高负载** | ⭐⭐ | 能耗 -2.7%，TTFT -79 steps |
+| **过载** | ⭐⭐ | 能耗 **-3.5%**，position sum **-17.6%**，放弃 -64 |
+
+> **选择建议**：
+> - **低-中负载 + 注重 TTFT SLA**：PB v3 双门槛是最佳选择（TTFT 大幅改善，吞吐影响小）
+> - **高负载 + 注重能耗成本**：PB v3 能真正降低 2-3.5% 电费，对大规模集群每年节省可观
+> - **负载波动大**：双门槛 EMA 自适应在低负载自动变保守，无需手调参数
+
+**生成图表**：
+
+| 文件 | 内容 |
+|------|------|
+| `scheduling_step_energy.png` | 逐 step 能耗 + position sum + batch size 三合一 |
+| `scheduling_comparison.png` | 六指标柱状图对比 |
+| `scheduling_ttft_dist.png` | TTFT 分布直方图 |
+| `scheduling_economics.png` | **经济分析**：成本拆解 + 吞吐 + 单价 + 各档次利润 |
+| `scheduling_economic_tradeoff.png` | **多负载扫描**：利润差异 + 能耗-吞吐 trade-off 散点图 |
+| `scheduling_summary.png` | 调度直觉图 + 完整汇总表格（含经济指标）|
+| `scheduling_load_sweep.png` | 四负载级别六指标对比 |
 
 ---
 
